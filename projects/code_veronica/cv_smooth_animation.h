@@ -15,7 +15,12 @@ bool native_scene_ready() {
     // its ordinary scene path remains drawable (no special-render flags).
     // 0x2004 is the scripted furniture sequence; it uses the same scene path.
     // Keep other event modes excluded; task/resource guards still reject loads.
-    const bool scripted_camera=(camera_mode==0x44||camera_mode==0x46||camera_mode==0x204||camera_mode==0x2004)&&(control&4);
+    // fork: in-engine cutscenes run with camera mode 0x4 and the same script
+    // control bit (seen with control 0x01010015); same scene path, so they are
+    // interpolated too. CV_SMOOTH_CUTSCENES=0 leaves them at 30 FPS.
+    static const bool cutscenes=[] {const char* e=std::getenv("CV_SMOOTH_CUTSCENES");return !(e&&e[0]=='0');}();
+    const bool scripted_camera=(camera_mode==0x44||camera_mode==0x46||camera_mode==0x204||camera_mode==0x2004||
+        (cutscenes&&camera_mode==0x4))&&(control&4);
     // 001AF3E0/00146F90 call message update/draw routine 001611C8 for bit 9.
     // Scene preparation would free its text lists. Keep the original frame
     // until the message closes, without repeating its input/timer logic.
@@ -268,6 +273,10 @@ void scene_models_blend(const ProbeModel* models,unsigned count,const ProbeModel
         scene_model_write(current,*previous,alpha);
     }
 }
+bool cutscene_bars_enabled() {
+    static const bool on=[] {const char* e=std::getenv("CV_SMOOTH_CUTSCENE_BARS");return !(e&&e[0]=='0');}();
+    return on;
+}
 // EU-only diagnostic: repeat scene preparation without the task dispatcher.
 void render_scene_between_ticks(ppu_context* ctx, unsigned count, double phase) {
     static const bool on=[] {const char* e=std::getenv("CV_SMOOTH_ANIMATION");return e&&std::strcmp(e,"1")==0;}();
@@ -342,6 +351,12 @@ void render_scene_between_ticks(ppu_context* ctx, unsigned count, double phase) 
     }
     CV_SCENE_FN_00158620(ctx);drain_scene(ctx);
     CV_SCENE_FN_00146BE0(ctx);drain_scene(ctx);
+#if defined(CV_REGION_US)
+    // fork: the cutscene letterbox. The original scene draw (00146298, at
+    // 00146564) calls func_00190010 when the bars' opacity at system+0x2A644 is
+    // above zero; the rebuilt image must draw them too, or they vanish.
+    if(cutscene_bars_enabled()&&read_float(system+0x2A644)>0.0f){func_00190010(ctx);drain_scene(ctx);}
+#endif
     for(unsigned i=0;i<10;i++)vm_write32(camera+scene_fields[i],saved[i]);
     *ctx=incoming;
 }

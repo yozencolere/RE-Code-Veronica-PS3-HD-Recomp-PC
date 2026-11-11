@@ -84,12 +84,23 @@ localement), ni les fichiers du jeu, ni les textures extraites ou agrandies.
 - `CV_DOOR_SMOOTH=0` remet les portes d'origine ; `CV_DOOR_LOG=1` écrit `door-log.txt` et `door60-log.txt`.
 - Fichier : `projects/code_veronica/cv_fps_experimental.cpp` (version US seulement).
 
-## 8. Version sans fenêtre console
+## 8. Cinématiques du moteur à 60 FPS
+
+- Les cinématiques calculées par le moteur (pas les vidéos `.pam`) tournent avec le mode caméra `0x4` et le bit
+  de contrôle « script » : l'interpolation des salles les excluait, elles restaient à 30 FPS.
+- `native_scene_ready()` accepte maintenant ce mode, comme les escaliers et événements scriptés déjà gérés
+  (mêmes garde-fous : changements de plan, chargements, messages).
+- Les bandes noires (`func_00190010`, appelée par le dessin de scène quand leur opacité à système+0x2A644 est
+  positive) sont redessinées sur l'image reconstruite ; sinon elles disparaissaient hors sous-titres.
+- `CV_SMOOTH_CUTSCENES=0` remet les cinématiques d'origine, `CV_SMOOTH_CUTSCENE_BARS=0` coupe le redessin des
+  bandes. Fichier : `projects/code_veronica/cv_smooth_animation.h` (bandes : version US).
+
+## 9. Version sans fenêtre console
 
 - `_build/build_us_dist.cmd` produit l'exe US en sous-système Windows (aucune fenêtre cmd) et `Code Veronica.exe`.
   `_build/build_us.cmd` produit la version console (utile pour les diagnostics).
 
-## 9. Diagnostic des appuis de touches
+## 10. Diagnostic des appuis de touches
 
 - `CV_PAD_TRACE=1` journalise les appuis reçus (a servi à montrer que les doubles entrées venaient de l'option
   « Confirmation améliorée », pas de la manette). Fichier : `libs/input/cellPad.c`.
