@@ -70,12 +70,26 @@ localement), ni les fichiers du jeu, ni les textures extraites ou agrandies.
 - `CV_SKIP_MT_LOGO=0` pour garder le logo. L'option existante `cv_skip_logos` saute toujours tout.
 - Fichier : `projects/code_veronica/boot_skip.cpp`.
 
-## 7. Version sans fenêtre console
+## 7. Animations de porte à 60 FPS
+
+- En mode 60 FPS, le jeu calcule 30 images par seconde et le portage interpole une image sur deux, mais seulement
+  dans les salles : pendant une porte, chaque image était affichée deux fois (rendu à 30 FPS).
+- Pendant une porte, `func_0003B810` (US) anime et dessine la scène de porte, objet `0x00CA72F0` : caméra
+  (+0x58/+0x5C/+0x60, angles +0x70/+0x74/+0x78), fondu (+0x3C), modèle de la porte (+0xC4, arbre de pièces
+  avec position / rotation / échelle).
+- Sur l'image intermédiaire, une mise à jour du jeu de plus tourne avec la porte en pause (bit 0x80 de +0x08 :
+  la routine ne fait que dessiner, sans faire avancer quoi que ce soit ni demander de son), la caméra, le fondu
+  et les pièces de la porte placés une demi-image plus loin ; ensuite ces valeurs et le chronomètre de partie
+  sont remis comme avant. (Dessiner la porte hors d'une mise à jour bloque son moteur de rendu de modèles.)
+- `CV_DOOR_SMOOTH=0` remet les portes d'origine ; `CV_DOOR_LOG=1` écrit `door-log.txt` et `door60-log.txt`.
+- Fichier : `projects/code_veronica/cv_fps_experimental.cpp` (version US seulement).
+
+## 8. Version sans fenêtre console
 
 - `_build/build_us_dist.cmd` produit l'exe US en sous-système Windows (aucune fenêtre cmd) et `Code Veronica.exe`.
   `_build/build_us.cmd` produit la version console (utile pour les diagnostics).
 
-## 8. Diagnostic des appuis de touches
+## 9. Diagnostic des appuis de touches
 
 - `CV_PAD_TRACE=1` journalise les appuis reçus (a servi à montrer que les doubles entrées venaient de l'option
   « Confirmation améliorée », pas de la manette). Fichier : `libs/input/cellPad.c`.
