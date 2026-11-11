@@ -3409,6 +3409,23 @@ static const wchar_t* const k_original_language_text[LANG_COUNT][4] = {
 
 // Order matches Lang and Enhancement.
 inline const wchar_t* enhancement_text(int language,int option,bool description) {
+    /* fork: option 6, start the game directly (its own table, in Lang order) */
+    static const wchar_t* const direct[LANG_COUNT][2]={
+        {L"Iniciar o jogo diretamente",L"Não mostra o launcher ao abrir; segure Shift ao abrir para vê-lo. Insert ou F5 no jogo o abre."},
+        {L"Start the game directly",L"Skip the launcher at startup; hold Shift while opening to show it. Insert or F5 in game opens it."},
+        {L"Iniciar el juego directamente",L"No muestra el launcher al abrir; mantén Shift al abrir para verlo. Insert o F5 en el juego lo abre."},
+        {L"ゲームを直接起動",L"起動時にランチャーを表示しません。表示するには起動中にShiftを押し続けます。ゲーム中はInsertかF5で開きます。"},
+        {L"Lancer le jeu directement",L"N’affiche pas le lanceur au démarrage ; maintenez Maj pour l’afficher. Inser ou F5 en jeu l’ouvre."},
+        {L"Spiel direkt starten",L"Überspringt den Launcher beim Start; Umschalt gedrückt halten, um ihn zu zeigen. Einfg oder F5 im Spiel öffnet ihn."},
+        {L"Avvia direttamente il gioco",L"Salta il launcher all’avvio; tieni premuto Maiusc per mostrarlo. Ins o F5 nel gioco lo apre."},
+        {L"Uruchamiaj grę od razu",L"Pomija launcher przy starcie; przytrzymaj Shift, aby go pokazać. Insert lub F5 w grze go otwiera."},
+        {L"Oyunu doğrudan başlat",L"Açılışta başlatıcıyı atlar; göstermek için açarken Shift’i basılı tutun. Oyunda Insert veya F5 açar."},
+        {L"تشغيل اللعبة مباشرة",L"يتخطى المشغّل عند البدء؛ اضغط Shift مطولاً لإظهاره. يفتحه Insert أو F5 أثناء اللعب."},
+        {L"直接启动游戏",L"启动时不显示启动器；启动时按住 Shift 可显示。游戏中按 Insert 或 F5 打开。"},
+        {L"게임 바로 시작",L"시작할 때 런처를 건너뜁니다. 표시하려면 Shift를 누른 채 여세요. 게임 중 Insert 또는 F5로 엽니다."},
+        {L"Сразу запускать игру",L"Не показывает лаунчер при запуске; удерживайте Shift, чтобы его открыть. В игре — Insert или F5."},
+    };
+    if(option==6){if(language<0||language>=LANG_COUNT)language=LANG_EN;return direct[language][description];}
     static const wchar_t* const texts[LANG_COUNT][6][2]={
         {
             {L"Animações suaves a 60 FPS",L"Câmeras, personagens, objetos e cenas. Selecione também 60 FPS."},

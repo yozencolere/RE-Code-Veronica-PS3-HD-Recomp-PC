@@ -522,6 +522,8 @@ extern "C" void cv_discord_start(const char* title_id);   /* cv_discord.cpp */
 #endif
 
 #include "cv_ptbr_spacing.h"
+#include "cv_eu_text_metrics.h"
+extern "C" { int cv_glyph_limit = 108; }   /* fork: read by the patched US text routines */
 
 extern "C" void rsx_d3d12_disable_forced_anisotropy(void);
 extern "C" void cv_modern_boot();
@@ -656,6 +658,7 @@ int main(int argc, char** argv)
     }
 
     if(!cv_ptbr_choices_install()||!cv_ptbr_spacing_install()){fprintf(stderr,"ERROR: incompatible PT-BR font metrics\n");return 2;}
+    cv_eu_text_metrics_install();   /* fork: European advances for EU text in the US release */
     if(argc>=3 && !strcmp(argv[2],"--ptbr-metrics-self-test")) {
         fprintf(stderr,"[PTBR-SPACING] REAL-ELF-BOOT-TEST PASS; VM range guard=%u\n",ppu_vm_size);
         return 0;

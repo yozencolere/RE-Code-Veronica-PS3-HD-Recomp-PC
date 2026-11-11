@@ -23,6 +23,52 @@
 #include "analog_bindings.h"
 #include "pad_keyboard_filter.h"
 
+/* fork: CV_PAD_TRACE=1 -- who reads the pad, and who gets each fresh report.
+ * Once a second: calls and delivered (len > 0) packets per guest caller and
+ * thread; on every delivered packet whose digital buttons changed for that
+ * caller, the new value. Off (one cached getenv) otherwise. */
+#ifdef _WIN32
+#include "../../runtime/ppu/ppu_context.h"
+extern __declspec(thread) ppu_context* g_active_ctx;
+static void cv_pad_trace(unsigned port, const CellPadData* d)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("CV_PAD_TRACE"); on = e && e[0] == '1'; }
+    if (!on || port != 0) return;
+    static CRITICAL_SECTION cs; static volatile LONG init = 0;
+    if (InterlockedCompareExchange(&init, 1, 0) == 0) { InitializeCriticalSection(&cs); init = 2; }
+    while (init != 2) Sleep(0);
+    struct Caller { unsigned lr; DWORD tid; unsigned calls, fresh, last; };
+    static struct Caller callers[24]; static int ncallers = 0;
+    static unsigned long long last_report = 0;
+    const unsigned lr = g_active_ctx ? (unsigned)g_active_ctx->lr : 0;
+    const DWORD tid = GetCurrentThreadId();
+    const unsigned btn = ((unsigned)d->button[CELL_PAD_BTN_OFFSET_DIGITAL1] << 8) | d->button[CELL_PAD_BTN_OFFSET_DIGITAL2];
+    const unsigned long long now = GetTickCount64();
+    EnterCriticalSection(&cs);
+    struct Caller* c = NULL;
+    for (int i = 0; i < ncallers; i++) if (callers[i].lr == lr && callers[i].tid == tid) { c = &callers[i]; break; }
+    if (!c && ncallers < 24) { c = &callers[ncallers++]; c->lr = lr; c->tid = tid; c->calls = c->fresh = 0; c->last = 0xFFFFFFFFu; }
+    if (c) {
+        c->calls++;
+        if (d->len) {
+            c->fresh++;
+            if (btn != c->last) { fprintf(stderr, "[PADTRACE] %llu lr=%08X tid=%lu btn=%04X\n", now, lr, (unsigned long)tid, btn); c->last = btn; }
+        }
+    }
+    if (now - last_report >= 1000) {
+        last_report = now;
+        for (int i = 0; i < ncallers; i++) {
+            fprintf(stderr, "[PADTRACE] summary lr=%08X tid=%lu calls=%u fresh=%u\n", callers[i].lr, (unsigned long)callers[i].tid, callers[i].calls, callers[i].fresh);
+            callers[i].calls = callers[i].fresh = 0;
+        }
+    }
+    LeaveCriticalSection(&cs);
+}
+#else
+static void cv_pad_trace(unsigned port, const CellPadData* d) { (void)port; (void)d; }
+#endif
+
 /* ---------------------------------------------------------------------------
  * Backend selection
  * -----------------------------------------------------------------------*/
@@ -960,6 +1006,7 @@ emit:
             else                        s_data_fresh[port_no] = 0;
         }
     }
+    cv_pad_trace(port_no, data);
     {
         unsigned int ea = (unsigned int)(uintptr_t)data_guest;
         vm_write32((unsigned long long)ea + 0, (unsigned int)data->len);   /* len (s32) */

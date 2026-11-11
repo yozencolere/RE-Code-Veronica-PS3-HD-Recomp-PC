@@ -8,7 +8,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR arguments, int) {
     const DWORD length=GetModuleFileNameW(nullptr,path,32768);
     if(!length||length>=32768)return 1;
     const auto directory=std::filesystem::path(path).parent_path()/L"bin";
-    const auto executable=directory/L"CodeVeronicaPort.exe";
+    // fork: the US executable directly when it is there (US game with the
+    // European texts), so "start the game directly" needs no EU hand-off.
+    std::error_code error;
+    const auto us=directory/L"CodeVeronicaPort_US.exe";
+    const auto executable=std::filesystem::is_regular_file(us,error)?us:directory/L"CodeVeronicaPort.exe";
     std::wstring command=L"\""+executable.wstring()+L"\"";
     if(arguments&&*arguments){command+=L" ";command+=arguments;}
     STARTUPINFOW startup{sizeof(startup)};

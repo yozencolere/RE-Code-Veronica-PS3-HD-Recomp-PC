@@ -271,7 +271,7 @@ struct Settings {
     int contrast = 100;   /* 50..180 percent */
     int saturation = 100; /* 0..200 percent */
     int sharpness = 0;    /* FSR 1 RCAS, 0..100 percent in steps of 10; 0 off */
-    bool enhancements[6] = {}; // opt-in; applied at the next game start
+    bool enhancements[7] = {}; // opt-in; applied at the next game start
     bool patch[8] = {};    /* k_patches on/off */
     int layout = 2;        /* button icons: 0 PlayStation, 1 Xbox, 2 automatic, 3 keyboard, 4 Nintendo Switch */
     int rumble = 100;      /* vibration strength, percent (PAD_RUMBLE_SCALE): 0 off .. 200 */
@@ -342,9 +342,9 @@ const PatchOpt k_patches[] = {
     { "cv_infinite_ammo", S_CHEAT_AMMO_T, S_CHEAT_AMMO_D, S_PATCH_LOGO_C },
 };
 const int NPATCHES = sizeof k_patches / sizeof k_patches[0];
-enum Enhancement { E_SMOOTH, E_INPUT, E_NOTICES, E_DOF, E_AMMO, E_HIDE, E_COUNT };
-const char* const enhancement_env[E_COUNT]={"CV_SMOOTH_ANIMATION","CV_INPUT_COMFORT","CV_SKIP_START_NOTICES","CV_DISABLE_DOF","CV_AMMO_READOUT","CV_HIDE_LAUNCHER"};
-const wchar_t* const enhancement_keys[E_COUNT]={L"smooth_animation",L"input_comfort",L"skip_start_notices",L"disable_dof",L"ammo_readout",L"hide_launcher"};
+enum Enhancement { E_SMOOTH, E_INPUT, E_NOTICES, E_DOF, E_AMMO, E_HIDE, E_DIRECT, E_COUNT };
+const char* const enhancement_env[E_COUNT]={"CV_SMOOTH_ANIMATION","CV_INPUT_COMFORT","CV_SKIP_START_NOTICES","CV_DISABLE_DOF","CV_AMMO_READOUT","CV_HIDE_LAUNCHER","CV_DIRECT_START"};
+const wchar_t* const enhancement_keys[E_COUNT]={L"smooth_animation",L"input_comfort",L"skip_start_notices",L"disable_dof",L"ammo_readout",L"hide_launcher",L"direct_start"};
 
 /* Infinite health and ammunition: shown on the Inventario page, beside the
  * item menu, rather than with the game patches. */
@@ -1798,6 +1798,7 @@ bool region_ready(int i)
     return valid && (!region_needs_rap(i) || (!g.s.region_rap[i].empty() && fs::is_regular_file(g.s.region_rap[i], ec)));
 }
 int ready_count() { int n = 0; for (int i = 0; i < 3; i++) n += region_ready(i); return n; }
+bool g_direct_start = false;   /* fork: launcher kept hidden at startup */
 bool g_version_picked = false;   /* a card was clicked this session (needed with 2+ ready versions) */
 
 /* A shortcut on all four: keyboard, PlayStation, Xbox and Switch controllers. */
@@ -1993,7 +1994,7 @@ void scan_patch_dir()
 
 void draw_enhancement(Graphics& gr,float x,float& y,float w,int option,const Font& body,const Font& fsm) {
     if(option==E_SMOOTH)return;
-    const bool usable=!g.running||option==E_HIDE;
+    const bool usable=!g.running||option==E_HIDE||option==E_DIRECT;
     option_card(gr,x,y,w,56,g.s.enhancements[option],usable?ID_ENHANCEMENT+option:-1,
                 enhancement_text(g_lang,option,false),enhancement_text(g_lang,option,true),body,fsm);
     y+=62;
@@ -2372,15 +2373,11 @@ void draw_avancado(Graphics& gr, const Font& head, const Font& body, const Font&
     text(gr, T(S_LANG_HINT), x, y + 28, fsm, C_DIM, StringAlignmentNear, 240, 20);
     y += 54;
     /* Updates from the GitHub releases (cv_updater.h) */
-    option_card(gr, x, y, w, 52, g.s.check_updates, ID_UPD_TOGGLE, ux(upd_text::OPTION), ux(upd_text::OPTION_DESC), body, fsm);
-    y += 58;
-    {
-        const bool busy = g_upd.step != UPD_NONE;
-        button(gr, RectF(x, y, 220, 30), ux(upd_text::CHECK_NOW), ID_UPD_CHECK, body, false, !g.running && !busy);
-        const std::wstring st = g_upd.step == UPD_CHECKING && g_upd.manual ? ux(upd_text::CHECKING) : g_upd.status;
-        text(gr, st, x + 236, y, body, C_DIM, StringAlignmentNear, w - 236, 30);
-    }
-    y += 44;
+    /* fork: no automatic update check (it would replace the modified exe);
+     * its switch makes room for the direct start option */
+    draw_enhancement(gr,x,y,w,E_DIRECT,body,fsm);
+    /* fork: the manual "check now" button is gone too, an upstream update
+     * would replace the modified executables */
     /* "Playing ..." on Discord (cv_discord.cpp) */
     option_card(gr, x, y, w, 52, g.s.discord, ID_DISCORD, cv_discord_text::texts[g_lang][cv_discord_text::OPTION],
                 cv_discord_text::texts[g_lang][cv_discord_text::OPTION_DESC], body, fsm);
@@ -3477,7 +3474,7 @@ void click(int id)
     else if(id==ID_GRAPHICS_DOF&&!g.running){g.s.enhancements[E_DOF]=!g.s.enhancements[E_DOF];changed();}
     else if(id==ID_GRAPHICS_FRAME_GEN&&!g.running&&frame_generation_allowed()){g.s.frame_generation=!g.s.frame_generation;if(g.s.frame_generation)g.s.vsync=0;changed();}
     else if(id==ID_GRAPHICS_VSYNC&&!(g.running&&g.s.frame_generation&&frame_generation_allowed())){g.s.vsync=!g.s.vsync;if(g.s.vsync&&!g.running)g.s.frame_generation=0;changed();}
-    else if(id>=ID_ENHANCEMENT&&id<ID_ENHANCEMENT+int(E_COUNT)&&id!=ID_ENHANCEMENT+int(E_SMOOTH)&&(!g.running||id==ID_ENHANCEMENT+int(E_HIDE))){g.s.enhancements[id-ID_ENHANCEMENT]^=true;changed();}
+    else if(id>=ID_ENHANCEMENT&&id<ID_ENHANCEMENT+int(E_COUNT)&&id!=ID_ENHANCEMENT+int(E_SMOOTH)&&(!g.running||id==ID_ENHANCEMENT+int(E_HIDE)||id==ID_ENHANCEMENT+int(E_DIRECT))){g.s.enhancements[id-ID_ENHANCEMENT]^=true;changed();}
     else if (id >= ID_PATCH && id < ID_PATCH + NPATCHES) { g.s.patch[id - ID_PATCH] ^= true; changed(); }
     else if (id == ID_DD_ORIGINAL_LANGUAGE || id == ID_DD_MANUAL_RELOAD || id == ID_DD_COMBAT_HUD || id == ID_DD_GAME_TEXT || id == ID_DD_TROPHY_CORNER || id == ID_DD_TROPHY_FILTER || id == ID_DD_MODE || id == ID_DD_RES || id == ID_DD_AA || id == ID_DD_FPS || id == ID_DD_POSE_DEVICE || id == ID_DD_SHARP || id == ID_DD_LANG || id==ID_DD_SRT_ENEMIES || id==ID_DD_SRT_CORNER || id==ID_DD_SRT_LANGUAGE || id == ID_DD_OV_CORNER || id == ID_DD_OV_LAYOUT || id == ID_DD_OV_SIZE || id == ID_DD_OV_BG || id == ID_DD_SRT_INVPOS || id == ID_DD_SRT_WINDOW || id == ID_DD_SRT_BOSSBAR) {
         g.open_dd = id; g.dd_scroll = 0;
@@ -4261,7 +4258,7 @@ void start_game()
     g_rsx_key_hook = key_hook;
     g.page = P_JOGO;   /* the first tab */
     InvalidateRect(g.hwnd, NULL, FALSE);
-    if(s.enhancements[E_HIDE])hide_menu();
+    if(s.enhancements[E_HIDE]&&!g_direct_start)hide_menu();
     SetEvent(s_play_ev);
 }
 
@@ -4309,8 +4306,13 @@ DWORD WINAPI launcher_thread(void*)
                              ww, wh, NULL, NULL, wc.hInstance, NULL);
     cv_srt_set_position_notify([](){if(g.hwnd)PostMessageW(g.hwnd,WM_SRT_POSITIONS,0,0);});
     BOOL dark = TRUE; DwmSetWindowAttribute(g.hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
-    ShowWindow(g.hwnd, SW_SHOW);
-    SetForegroundWindow(g.hwnd);
+    /* fork: "start the game directly" plays at once without showing this
+     * window; holding Shift at startup shows the launcher anyway. */
+    g_direct_start=g.s.enhancements[E_DIRECT]&&!(GetAsyncKeyState(VK_SHIFT)&0x8000);
+    if(!g_direct_start){
+        ShowWindow(g.hwnd, SW_SHOW);
+        SetForegroundWindow(g.hwnd);
+    }
     SetTimer(g.hwnd, 1, 30, NULL);
     {   /* Updates: delete what an install replaced, say it happened, look for a newer release. */
         wchar_t self[MAX_PATH]; GetModuleFileNameW(NULL, self, MAX_PATH);
@@ -4324,7 +4326,7 @@ DWORD WINAPI launcher_thread(void*)
         std::thread([dir] { cv_update::cleanup(dir); }).detach();
         const char* autoplay = getenv("CV_LAUNCHER_AUTOPLAY");
         const char* off = getenv("CV_UPDATE_DISABLE");
-        if (g.s.check_updates && !(autoplay && *autoplay) && !(off && *off == '1')) upd_check(false);
+        (void)autoplay;(void)off;   /* fork: the automatic update check is off */
     }
     /* Started by the other version's launcher for this version's folder:
      * play at once with the settings it saved. Once only. */
@@ -4332,6 +4334,15 @@ DWORD WINAPI launcher_thread(void*)
         _putenv_s("CV_LAUNCHER_AUTOPLAY", "");
         g_version_picked = true;   /* the other launcher already chose this version */
         click(ID_PLAY);
+    } else if (g_direct_start) {
+        g_version_picked = true;   /* the version selected last time */
+        click(ID_PLAY);
+    }
+    /* direct start that could not play (missing folder, licence...): show why */
+    if (g_direct_start && !g.running) {
+        g_direct_start = false;
+        ShowWindow(g.hwnd, SW_SHOW);
+        SetForegroundWindow(g.hwnd);
     }
     /* CV_UPDATE_PREVIEW=download|install: show the update card, for screenshots. */
     if (const char* u = getenv("CV_UPDATE_PREVIEW"); u && *u) {
@@ -4501,6 +4512,7 @@ static void snapshot_start_env()
 extern "C" void cv_launcher_relaunch(void)
 {
     if (g_quit_all || g_start_env.size() < 2) return;
+    if (g.s.enhancements[E_DIRECT]) return;   /* fork: direct start quits with the game */
     wchar_t self[MAX_PATH];
     if (!GetModuleFileNameW(NULL, self, MAX_PATH)) return;
     std::wstring cmd = L"\"" + std::wstring(self) + L"\"";
@@ -4510,6 +4522,10 @@ extern "C" void cv_launcher_relaunch(void)
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
     }
 }
+
+/* fork: "Quit to Windows" in the game's own options menu (cv_appearance_menu.cpp),
+ * from the game thread: the same as Fermer le jeu, no launcher afterwards. */
+extern "C" void cv_quit_to_windows(void) { quit_game(); }
 
 extern "C" int cv_launcher_run(char* eboot_out, size_t cap)
 {

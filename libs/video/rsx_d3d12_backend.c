@@ -219,6 +219,9 @@ typedef struct {
      * offset + 1 into s_fp_arena (0 = none, read guest memory). */
     u32 fp_snap;
     u32 fp_bytes;              /* exact complete bytecode length, 0 = invalid */
+    /* fork: half a texel in a15 units (u, v) by which each 6-vertex quad's
+     * texture rectangle is pulled in (vf_wrap_vs), 0 = none. */
+    float uv_inset[2];
 } D3D12DrawRecord;
 #include "rsx_shadow_batch.h"
 static const u8* fp_snap_ptr(const D3D12DrawRecord* dr);
@@ -2572,7 +2575,7 @@ static int init_d3d12(u32 width, u32 height)
          * it, rather than relying on SV_VertexID including the start. */
         rp[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         rp[5].Constants.ShaderRegister = 2;
-        rp[5].Constants.Num32BitValues = 1;
+        rp[5].Constants.Num32BitValues = 3;   /* fork: + quad inset u, v */
         rp[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
         D3D12_ROOT_SIGNATURE_DESC rd = {0};
         rp[6].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;rp[6].Descriptor.ShaderRegister=25;
@@ -3712,6 +3715,75 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
 
 }
 
+
+/* fork: CV_NEAREST_DUMP=<file>: once a frame has drawn a tex_nearest texture
+ * for 90 frames in a row (the inventory has settled), write every draw of
+ * that frame -- textures with their texpack hash, viewport, topology and
+ * every vertex's non-zero attributes -- to <file>. No key press needed. */
+static int tex_fork_flags(u32 off, u32 w, u32 h, u32 fmt);
+static void nearest_dump(u32 fi, u32 ndraws)
+{
+    static int done = 0; static u32 run = 0;
+    const char* path = getenv("CV_NEAREST_DUMP");
+    if (!path || !*path || done || !s_d3d.vp_vb_mapped) return;
+    int hit = 0;
+    for (u32 d = 0; d < ndraws && d < MAX_DRAWS && !hit; d++) {
+        const D3D12DrawRecord* r = &s_rb.draws[d];
+        if (r->is_clear || r->is_copy) continue;
+        for (int u = 0; u < FP_TEX_UNITS; u++)
+            if (r->tex[u].set && !r->tex[u].cube && tex_fork_flags(r->tex[u].off, r->tex[u].w, r->tex[u].h, r->tex[u].fmt)) hit = 1;
+    }
+    run = (hit && ndraws >= 25) ? run + 1 : 0;   /* the inventory draws about 36 */
+    if (run < 90) return;
+    done = 1;
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    extern uint8_t* vm_base;
+    const u32 par = (u32)s_rb.parity;
+    fprintf(f, "frame=%llu draws=%u backbuffer=%ux%u\n", (unsigned long long)s_d3d.frame_count, ndraws, s_d3d.width, s_d3d.height);
+    for (u32 d = 0; d < ndraws && d < MAX_DRAWS; d++) {
+        const D3D12DrawRecord* r = &s_rb.draws[d];
+        if (r->is_clear || r->is_copy || !r->is_vp) continue;
+        fprintf(f, "op%03u n=%u topo=%u vs=%d rt=0x%08X %ux%u vp=%u,%u,%u,%u blend=%d inset=%g,%g\n", d, r->vertex_count, r->topology,
+                r->vs_idx, r->rt_off, r->rt_w, r->rt_h, r->vp_x, r->vp_y, r->vp_w, r->vp_h, r->blend, r->uv_inset[0], r->uv_inset[1]);
+        for (int u = 0; u < FP_TEX_UNITS; u++) {
+            if (!r->tex[u].set) continue;
+            unsigned long long h = 0;
+            const u32 bf = r->tex[u].fmt & 0x9Fu, w = r->tex[u].w, hh = r->tex[u].h;
+            size_t bytes = 0;
+            if (bf == 0x86) bytes = (size_t)((w + 3) / 4) * ((hh + 3) / 4) * 8;
+            else if (bf == 0x87 || bf == 0x88) bytes = (size_t)((w + 3) / 4) * ((hh + 3) / 4) * 16;
+            else if (bf == 0x85) bytes = (size_t)w * hh * 4;
+            if (bytes && vm_base && r->tex[u].off && !r->tex[u].cube) h = texpack_hash(vm_base + r->tex[u].off, bytes, w, hh, bf);
+            fprintf(f, "  t%d %ux%u fmt=%02X addr=%08X off=%08X hash=%016llX flags=%d\n", u, w, hh, bf, r->tex[u].addr,
+                    r->tex[u].off, h, r->tex[u].cube ? 0 : tex_fork_flags(r->tex[u].off, w, hh, r->tex[u].fmt));
+        }
+        for (u32 v = 0; v < r->vertex_count && v < 2048; v++) {
+            float pulled[16][4];
+            const float* a = (const float*)((const char*)s_d3d.vp_vb_mapped
+                + (u64)par * MAX_VERTICES * 256u + r->vb_byte_offset + (u64)v * 256u);
+            if (s_vf_mapped) { vf_capture_vertex(par, r->vb_byte_offset / 256 + v, pulled); a = &pulled[0][0]; }
+            fprintf(f, "  v%u:", v);
+            for (int at = 0; at < 16; at++) {
+                const float* q = a + at * 4;
+                if (q[0] || q[1] || q[2] || q[3]) fprintf(f, " a%d=(%.4f %.4f %.4f %.4f)", at, q[0], q[1], q[2], q[3]);
+            }
+            fputc('\n', f);
+        }
+        if (s_d3d.vp_cb_mapped && (d == 0 || r->vcb_slot != s_rb.draws[d - 1].vcb_slot)) {
+            const float* c = (const float*)((const char*)s_d3d.vp_cb_mapped + ((u64)par * MAX_DRAWS + r->vcb_slot) * VP_CB_STRIDE);
+            for (int sl = 0; sl < 16; sl++) {
+                const float* q = c + sl * 4;
+                if (q[0] || q[1] || q[2] || q[3]) fprintf(f, "  c[%d]=(%g %g %g %g)\n", sl, q[0], q[1], q[2], q[3]);
+            }
+        }
+    }
+    fclose(f);
+    fprintf(stderr, "[NEAREST] draw dump written to %s\n", path);
+    /* and the whole frame at full resolution (<RSX_CAP_DIR>/frame_99) */
+    if (getenv("CV_NEAREST_DUMP_CAP")) rsx_capture_frame(fi, ndraws, 99);
+}
+
 #endif
 /* On-disk shader cache. FXC takes tens of milliseconds per translated
  * program, and every new area brings dozens -- the stutter when walking into
@@ -4409,7 +4481,7 @@ static int vf_wrap_vs(char* hlsl, size_t cap)
         "}\n"
         "#if VF_POSE_ENABLED\n" RSX_POSE_GPU_HLSL "#endif\n";
     static const char tail[] =
-        "cbuffer VFDraw : register(b2) { uint vf_first; };\n"
+        "cbuffer VFDraw : register(b2) { uint vf_first; float vf_inset_u; float vf_inset_v; };\n"
         "VSOutput main(uint vf_vid : SV_VertexID) {\n"
         "    uint2 rec = vf_buf.Load2((vf_first + vf_vid) * 8u);\n"
         "    VSInput input;\n"
@@ -4421,6 +4493,15 @@ static int vf_wrap_vs(char* hlsl, size_t cap)
         "    input.a10 = vf_fetch(rec.y, 10u, rec.x); input.a11 = vf_fetch(rec.y, 11u, rec.x);\n"
         "    input.a12 = vf_fetch(rec.y, 12u, rec.x); input.a13 = vf_fetch(rec.y, 13u, rec.x);\n"
         "    input.a14 = vf_fetch(rec.y, 14u, rec.x); input.a15 = vf_fetch(rec.y, 15u, rec.x);\n"
+        "    if (vf_inset_u > 0.0 || vf_inset_v > 0.0) {\n"
+        "        uint qb = vf_vid - vf_vid % 6u; float2 lo = float2(1e30, 1e30), hi = float2(-1e30, -1e30);\n"
+        "        [unroll] for (uint qk = 0u; qk < 6u; qk++) { uint2 qr = vf_buf.Load2((vf_first + qb + qk) * 8u);\n"
+        "            float2 qt = vf_fetch(qr.y, 15u, qr.x).xy; lo = min(lo, qt); hi = max(hi, qt); }\n"
+        "        float2 ins = float2(vf_inset_u, vf_inset_v); float2 t = input.a15.xy;\n"
+        "        [unroll] for (uint c = 0u; c < 2u; c++) if (hi[c] - lo[c] >= 2.0 * ins[c]) {\n"
+        "            if (t[c] <= lo[c]) t[c] += ins[c]; else if (t[c] >= hi[c]) t[c] -= ins[c]; }\n"
+        "        input.a15.xy = t;\n"
+        "    }\n"
         "#if VF_POSE_ENABLED\n"
         "    input.a0=vf_pose_position(vf_first+vf_vid,input.a0);\n"
         "#endif\n"
@@ -5249,13 +5330,16 @@ static int fp_build_pso(FpJob* j)
         /* Wrap: the static samplers already wrap. frac() here broke the
          * derivatives at every seam, which with mip levels (RSX_TEX_MIPS)
          * picked the smallest level along a line through the texture. */
-        "    if (m == 1.0) return c;\n"
-        "    if (m == 2.0) { float t = frac(c * 0.5) * 2.0; return t > 1.0 ? 2.0 - t : t; }\n"
-        "    if (m == 6.0 || m == 8.0) return clamp(abs(c), e, 1.0 - e);\n"
-        "    if (m == 3.0 || m == 4.0 || m == 5.0 || m == 7.0) return clamp(c, e, 1.0 - e);\n"
-        "    return c;\n"
+        /* fork: mode + 16 asks for texel-centre sampling (tex_nearest). */
+        "    bool sn = m >= 16.0; if (sn) m -= 16.0;\n"
+        "    float r = c;\n"
+        "    if (m == 2.0) { float t = frac(c * 0.5) * 2.0; r = t > 1.0 ? 2.0 - t : t; }\n"
+        "    else if (m == 6.0 || m == 8.0) r = clamp(abs(c), e, 1.0 - e);\n"
+        "    else if (m == 3.0 || m == 4.0 || m == 5.0 || m == 7.0) r = clamp(c, e, 1.0 - e);\n"
+        "    if (sn && e > 0.0) r = (floor(r / (2.0 * e)) + 0.5) * (2.0 * e);\n"
+        "    return r;\n"
         "}\n"
-        "#define RSX_ADDR(u, c) float2(rsx_addr1((c).x, (float)((uint)rsx_texaddr[u].z & 15u), rsx_texaddr[u].x), rsx_addr1((c).y, rsx_texaddr[u].w, rsx_texaddr[u].y))\n"
+        "#define RSX_ADDR(u, c) float2(rsx_addr1((c).x, (float)(((uint)rsx_texaddr[u].z & 15u) | (((uint)rsx_texaddr[u].z >> 5) & 16u)), rsx_texaddr[u].x), rsx_addr1((c).y, rsx_texaddr[u].w, rsx_texaddr[u].y))\n"
         /* TEXTURE_ADDRESS gamma bits: the unit's channels are sRGB and the
          * hardware linearises them on fetch (RPCS3 _process_texel). */
         "float4 rsx_texgamma(uint u, float4 c) {\n"
@@ -7584,6 +7668,89 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
 /* Snapshot the VP constant bank + viewport epilogue for one draw into its
  * vp_cb slot. Runs at record time so every draw keeps the constants that
  * were live when the guest issued it. */
+/* fork: textures sampled at texel centres (nearest) instead of linearly.
+ * Code Veronica's inventory atlas (item1\subtx tex0001, 768x768 DXT5) packs
+ * its corrugated panels as strips separated by 1-texel transparent or dark
+ * columns. Linear filtering at a strip's edge takes in half that column:
+ * invisible at 720p, a thin dark vertical line at 4K (about 2.4 pixels per
+ * texel). Known by the texture-mod hash (texpack_hash, the dump file name),
+ * computed only for textures of a listed size and cached per guest offset.
+ * CV_NEAREST_TEXTURES=<hash>:<w>x<h>,... adds textures; =0 turns it off. */
+typedef struct { uint64_t hash; u32 w, h; u32 flags; } NearestTex;   /* flags: 1 nearest, 2 quad inset */
+static NearestTex s_nearest[32];
+static int s_nearest_n = -1;
+static void nearest_init(void)
+{
+    /* The inventory's atlases. Every quad is 6 vertices (two triangles)
+     * whose texture rectangle ends exactly on its neighbour's texels: the
+     * bilinear filter took in half of that neighbour (a dark separator
+     * column, or across the wrap, the atlas's black last column), a thin
+     * line at 4K at every joint. Pulling each quad's rectangle in by half a
+     * texel (vf_wrap_vs) keeps the filtering and drops the bleed. Measured
+     * with CV_NEAREST_DUMP on the inventory: coordinates are a15 / 4096. */
+    static const NearestTex defaults[] = {
+        { 0x7726B4869ECEE0ECull, 768, 768, 2 },    /* panels, US and EU English */
+        { 0xF58B146B534288E3ull, 768, 768, 2 },    /* panels, EU French */
+        { 0xEC0CF14D42A0FAB4ull, 768, 768, 2 },    /* panels, EU German */
+        { 0x188C27260D8D88FEull, 768, 768, 2 },    /* panels, EU Italian */
+        { 0x835B8A496BEFFCE4ull, 768, 768, 2 },    /* panels, EU Spanish */
+        { 0x80825AC3566791AEull, 768, 768, 2 },    /* item icons and their blue boxes */
+        { 0x0970338B235A8658ull, 768, 768, 2 },    /* item icons */
+        { 0x7A9A1A1002AC8258ull, 768, 1024, 2 },   /* status panel pieces */
+        { 0x59FBCA3A77575D6Eull, 384, 384, 2 },    /* small pieces */
+        { 0x7B993BFC9B73DEF8ull, 768, 768, 2 },    /* background grid */
+    };
+    s_nearest_n = 0;
+    const char* inset = getenv("CV_UV_INSET");
+    if (!(inset && !strcmp(inset, "0")))
+        for (size_t i = 0; i < sizeof defaults / sizeof defaults[0]; i++) s_nearest[s_nearest_n++] = defaults[i];
+    /* CV_NEAREST_TEXTURES=<hash>:<w>x<h>,... : texel-centre sampling;
+     * CV_UV_INSET_TEXTURES: more quad-inset textures. */
+    for (int pass = 0; pass < 2; pass++) {
+        const char* e = getenv(pass ? "CV_UV_INSET_TEXTURES" : "CV_NEAREST_TEXTURES");
+        while (e && *e && s_nearest_n < 32) {
+            unsigned long long h = 0; unsigned w = 0, hh = 0; int n = 0;
+            if (sscanf(e, "%llx:%ux%u%n", &h, &w, &hh, &n) == 3 && n > 0) {
+                s_nearest[s_nearest_n].hash = h; s_nearest[s_nearest_n].w = w; s_nearest[s_nearest_n].h = hh;
+                s_nearest[s_nearest_n].flags = pass ? 2u : 1u; s_nearest_n++;
+                e += n;
+            } else break;
+            while (*e == ',' || *e == ' ') e++;
+        }
+    }
+    fprintf(stderr, "[NEAREST] %d listed textures (quad inset %s)\n", s_nearest_n, vf_enabled() ? "on" : "needs RSX_GPU_VFETCH=1");
+}
+static int tex_fork_flags(u32 off, u32 w, u32 h, u32 fmt)
+{
+    extern uint8_t* vm_base;
+    if (s_nearest_n < 0) nearest_init();
+    if (!s_nearest_n || !off || !vm_base) return 0;
+    int sized = 0;
+    for (int i = 0; i < s_nearest_n; i++) if (s_nearest[i].w == w && s_nearest[i].h == h) sized = 1;
+    if (!sized) return 0;
+    const u32 basef = fmt & 0x9Fu;
+    size_t bytes;
+    if (basef == 0x86) bytes = (size_t)((w + 3) / 4) * ((h + 3) / 4) * 8;
+    else if (basef == 0x87 || basef == 0x88) bytes = (size_t)((w + 3) / 4) * ((h + 3) / 4) * 16;
+    else if (basef == 0x85) bytes = (size_t)w * h * 4;
+    else return 0;
+    /* Cache per guest offset; the first 64 bytes guard against reuse. */
+    static struct { u32 off, w, h, fmt; u8 sig[64]; int result; } cache[16];
+    static int next = 0;
+    const u8* p = vm_base + off;
+    for (int i = 0; i < 16; i++)
+        if (cache[i].off == off && cache[i].w == w && cache[i].h == h && cache[i].fmt == basef &&
+            !memcmp(cache[i].sig, p, 64)) return cache[i].result;
+    const uint64_t hash = texpack_hash(p, bytes, w, h, basef);
+    int result = 0;
+    for (int i = 0; i < s_nearest_n; i++)
+        if (s_nearest[i].hash == hash && s_nearest[i].w == w && s_nearest[i].h == h) result |= (int)s_nearest[i].flags;
+    const int k = next; next = (next + 1) & 15;
+    cache[k].off = off; cache[k].w = w; cache[k].h = h; cache[k].fmt = basef; memcpy(cache[k].sig, p, 64); cache[k].result = result;
+    if (result) fprintf(stderr, "[NEAREST] texture %016llX at 0x%08X: flags %d\n", (unsigned long long)hash, off, result);
+    return result;
+}
+static int tex_nearest(u32 off, u32 w, u32 h, u32 fmt) { return tex_fork_flags(off, w, h, fmt) & 1; }
 static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
 {
     const rsx_state* st = s_d3d.current_rsx_state;
@@ -7654,6 +7821,26 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
                       ts[_u*4+2] = (float)((u32)ts[_u*4+2] | 256u);
                   }
         }
+        /* fork: quad inset for unit 0 (vf_wrap_vs), half a texel in a15
+         * units, the inventory's texture coordinates being a15 / 4096. */
+        if (dr) {
+            D3D12DrawRecord* w = (D3D12DrawRecord*)dr;
+            w->uv_inset[0] = w->uv_inset[1] = 0.0f;
+            if (vf_enabled() && dr->tex[0].set && !dr->tex[0].cube && dr->tex[0].w && dr->tex[0].h &&
+                (tex_fork_flags(dr->tex[0].off, dr->tex[0].w, dr->tex[0].h, dr->tex[0].fmt) & 2)) {
+                w->uv_inset[0] = 2048.0f / (float)dr->tex[0].w;
+                w->uv_inset[1] = 2048.0f / (float)dr->tex[0].h;
+            }
+        }
+        /* fork: rsx_texaddr[u].z bit 9 and .w + 16: sample this unit at texel
+         * centres (tex_nearest). 2D textures only. */
+        if (dr)
+            for (int _u = 0; _u < FP_TEX_UNITS; _u++)
+                if (dr->tex[_u].set && !dr->tex[_u].cube &&
+                    tex_nearest(dr->tex[_u].off, dr->tex[_u].w, dr->tex[_u].h, dr->tex[_u].fmt)) {
+                    ts[_u*4+2] = (float)((u32)ts[_u*4+2] | 512u);
+                    ts[_u*4+3] = ts[_u*4+3] + 16.0f;
+                }
         /* TEX_NOGAMMA_FP=<code hex>:<unit>,...: drop the sRGB decode of those
          * units for the program with that code hash (an experiment: RPCS3
          * reads Code Veronica's water normal map raw). */
@@ -11778,8 +11965,13 @@ static void render_frame_impl(void)
                 { const int ln = (dr->topology == RSX_TOPOLOGY_LINES);
                   if (ln) s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(s_d3d.cmd_list, D3D_PRIMITIVE_TOPOLOGY_LINELIST);
                   if (s_vf_buf) {
-                      s_d3d.cmd_list->lpVtbl->SetGraphicsRoot32BitConstant(s_d3d.cmd_list, 5,
-                          dr->vb_byte_offset / 256, 0);
+                      { UINT k[3] = { dr->vb_byte_offset / 256, 0, 0 };
+                        /* fork: quad inset only on whole 6-vertex quads, unbatched */
+                        if ((dr->uv_inset[0] > 0.0f || dr->uv_inset[1] > 0.0f) && dr->topology == RSX_TOPOLOGY_TRIANGLES &&
+                            draw_vertices == dr->vertex_count && dr->vertex_count % 6u == 0u) {
+                            memcpy(&k[1], &dr->uv_inset[0], 4); memcpy(&k[2], &dr->uv_inset[1], 4);
+                        }
+                        s_d3d.cmd_list->lpVtbl->SetGraphicsRoot32BitConstants(s_d3d.cmd_list, 5, 3, k, 0); }
                       s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list, draw_vertices, 1, 0, 0);
                   } else
                   s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
@@ -12372,6 +12564,7 @@ skip_dump_consider: ;
      * rsxcap/frame_9N (RSX_CAP_DIR overrides the base). Lets a capture land
      * on a scene reached by hand, where a frame number cannot be predicted. */
 #ifndef CV_DISTRIBUTION
+    nearest_dump(fi, s_dbg_last_draws);
     { static u32 s_key_caps = 0;
       /* CV_AUTOCAP=<draws>: also capture once, by itself, after 30
        * consecutive frames of at least that many draws (a 3D scene). */

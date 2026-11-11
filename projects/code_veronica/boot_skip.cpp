@@ -21,6 +21,7 @@
 #include "cv_version.h"
 #include "cv_options.h"
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 void CV_OG_LOGO(ppu_context*);
@@ -41,15 +42,30 @@ void CV_FN_TITLE(ppu_context* ctx)
     CV_OG_TITLE(ctx);
 }
 
+/* fork: the logo layout (adv\boot.arc, CV_logo_hd) is six panes one after the
+ * other: kenko1 0-139, kenko2 140-279, kenko3 280-419, grotesque 420-559,
+ * CAPCOM 560-699, MT FRAMEWORK 700-819. Once the frame reaches the MT
+ * FRAMEWORK pane the logo is ended, so only CAPCOM is shown.
+ * CV_SKIP_MT_LOGO=0 keeps the original. */
+static bool skip_mt_on()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("CV_SKIP_MT_LOGO"); on = !(e && e[0] == '0'); }
+    return on != 0;
+}
+
 void CV_FN_LOGO(ppu_context* ctx)
 {
-    if (skip_on()) {
-        const uint32_t layout = vm_read32((uint32_t)ctx->gpr[3] + 0x3C);
-        if (layout) {
-            const float last = 820.0f;   /* one past the 0x333 the check waits for */
-            uint32_t bits;
-            std::memcpy(&bits, &last, 4);
-            vm_write32(layout + 0x34, bits);
+    const uint32_t layout = vm_read32((uint32_t)ctx->gpr[3] + 0x3C);
+    if (layout) {
+        const float last = 820.0f;   /* one past the 0x333 the check waits for */
+        uint32_t bits;
+        std::memcpy(&bits, &last, 4);
+        if (skip_on()) vm_write32(layout + 0x34, bits);
+        else if (skip_mt_on()) {
+            uint32_t cur = vm_read32(layout + 0x34); float frame;
+            std::memcpy(&frame, &cur, 4);
+            if (frame >= 700.0f && frame < 820.0f) vm_write32(layout + 0x34, bits);
         }
     }
     CV_OG_LOGO(ctx);

@@ -7,7 +7,7 @@ using namespace cv_appearance;
 static std::vector<Resource> load(const std::filesystem::path& file){std::vector<Resource> r;std::string e;assert(load_archive_resources(file,r,e));return r;}
 int main(int argc,char** argv){
  assert(argc==3);const std::filesystem::path us=argv[1],eu=argv[2];unsigned runs=0,changed=0,protected_resources=0;
- for(const char* locale:{"fra","ger","ita","spa"})for(const char* rel:{"rdx_lnk/rm_0000.arc","adv/boot.arc","adv/opt.arc"}){
+ for(const char* locale:{"fra","ger","ita","spa"})for(const char* rel:{"rdx_lnk/rm_0000.arc","rdx_lnk/rm_0010.arc","adv/boot.arc","adv/opt.arc"}){
   const auto original=us/"usa"/rel,foreign=eu/locale/rel;std::vector<uint8_t> bytes;
   assert(cv_translation_patch::read(original,bytes));const auto before=cv_translation_patch::hash(bytes);
   std::filesystem::path cache,again;std::string error;
@@ -22,6 +22,6 @@ int main(int argc,char** argv){
   }
   assert(cv_translation_patch::read(original,bytes)&&cv_translation_patch::hash(bytes)==before);++runs;
  }
- assert(runs==12&&changed>0&&protected_resources>0);
+ assert(runs==16&&changed>0&&protected_resources>0);
  std::cout<<"PASS: "<<runs<<" original US/EU archive combinations; "<<changed<<" translated resources; "<<protected_resources<<" US resources preserved byte-for-byte; US names and original files intact; cache reuse\n";
 }

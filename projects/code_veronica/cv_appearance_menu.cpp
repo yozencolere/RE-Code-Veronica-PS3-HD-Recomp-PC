@@ -43,6 +43,7 @@ extern "C" int cv_pc_settings_effects_read(void);
 extern "C" void cv_pc_settings_change(int which, int value);
 extern "C" uint32_t cellGcm_flip_submit_count(void);
 extern "C" void* rsx_d3d12_window(void);
+extern "C" void cv_quit_to_windows(void);   /* launcher.cpp */
 
 namespace {
 constexpr uint32_t kCursor=CV_MENU_CURSOR, kInput=CV_MENU_INPUT, kRepeat=CV_MENU_REPEAT;
@@ -57,6 +58,17 @@ constexpr uint32_t kConfirm=0xC000, kCancel=0x2001;
 constexpr uint32_t kScreen=CV_MENU_CURSOR+4, kFade=CV_MENU_CURSOR+0x4C;
 bool pc_selected=false, pc_open=false, drawing_main=false;
 int pc_row=0;
+/* fork: the OPTION menu's EXIT row (cursor 5, main screen) quits to Windows
+ * instead of resuming the game (cancel already resumes): a first confirm arms
+ * it and shows a prompt, a second one quits; moving or cancelling disarms. */
+constexpr uint32_t kExitRow=5;
+bool exit_armed=false;
+const char* exit_prompt() {
+    const char* system=std::getenv("PS3_SYSTEM_LANGUAGE");
+    /* drawn after the game's own EXIT label, on its row */
+    if(cv_enhanced_language()==0)return "PARA O WINDOWS? (CONFIRMAR)";
+    return system&&std::strcmp(system,"2")==0?"VERS WINDOWS ? (CONFIRMER)":"TO WINDOWS? (CONFIRM)";
+}
 cv_appearance::AppearancePreview appearance_preview;
 bool appearance_assets_attempted=false;
 unsigned appearance_choice=0;
@@ -254,6 +266,8 @@ bool extra_input(ppu_context* ctx,uint32_t input,uint32_t repeat){
 void draw_entry(const ppu_context* caller,uint32_t screen,uint32_t fade_bits) {
     if(screen!=0) { rsx_d3d12_set_ui_quads(nullptr,0); return; }
     TextBatch batch; batch.text(cv_enhanced_language()==0?"CONFIGURA\xC3\x87\xC3\x95" "ES DO RECOMP":"RECOMP SETTINGS",32,310,selected_color(pc_selected));
+    /* the EXIT row sits one row (31.5) under RECOMP SETTINGS, its label ends near x=160 */
+    if(exit_armed)batch.text(exit_prompt(),178,341.5f,selected_color(true),1,false,440);
     /* The black layer: the rows darken under it as it thickens. */
     float fade; std::memcpy(&fade,&fade_bits,4);
     const float shade=1.f-std::clamp(fade,0.f,1.f);
@@ -313,7 +327,7 @@ void consume(uint32_t input,uint32_t repeat) {vm_write32(input,0);vm_write32(rep
 void CV_FN_MENU_RESET(ppu_context* ctx) {
     pad_keyboard_reserve(0,0);
     rsx_d3d12_set_ui_retained(0);
-    pc_selected=pc_open=drawing_main=false; pc_row=0;pc_tab=0;tab_q=tab_e=pc_keyboard_tabs=false;tab_pad.fill(0);
+    pc_selected=pc_open=drawing_main=false; pc_row=0;pc_tab=0;exit_armed=false;tab_q=tab_e=pc_keyboard_tabs=false;tab_pad.fill(0);
     rsx_d3d12_set_ui_quads(nullptr,0);
     CV_OG_MENU_RESET(ctx);
 }
@@ -331,6 +345,13 @@ void CV_FN_MENU_INPUT(ppu_context* ctx) {
     const uint32_t repeat=interactive?vm_read32(repeat_address):0;
     uint32_t cursor=vm_read32(kCursor);
     if(pc_selected && cursor!=5)pc_selected=false;
+    const bool on_exit=!pc_open && !pc_selected && cursor==kExitRow && vm_read32(kScreen)==0 && vm_read32(kDialog)==0;
+    if(exit_armed && (!on_exit || (input&kCancel) || (repeat&(kUp|kDown|kLeft|kRight))))exit_armed=false;
+    if(interactive && on_exit && (input&kConfirm) && !(input&kCancel)) {
+        consume(input_address,repeat_address);sound(ctx,3);
+        if(exit_armed) {exit_armed=false;cv_quit_to_windows();}
+        else exit_armed=true;
+    } else
     if(pc_open) {
         const int tab_change=keyboard_tab(port,interactive);
         if(!cv_appearance::busy() && (input&kCancel || ((input&kConfirm)&&menu_back()))) {
