@@ -2,8 +2,11 @@
 
 Fork de **RE Code Veronica PS3 HD Recomp PC** de Kastiel
 ([kastieloficial/RE-Code-Veronica-PS3-HD-Recomp-PC](https://github.com/kastieloficial/RE-Code-Veronica-PS3-HD-Recomp-PC), licence MIT),
-à partir de la version **v1.5.3**. Toutes les modifications ci-dessous sont dans un commit posé sur le tag `v1.5.3`
-d'origine : `git diff v1.5.3` les montre en entier.
+mis à jour sur la version **v1.5.5** (branche `fork-fr-us-155`, fusion du tag `v1.5.5` d'origine).
+Toutes les modifications ci-dessous : `git diff v1.5.5` les montre en entier.
+
+Depuis la v1.5.5, « Confirmation améliorée » est activée d'office à 60 FPS par le port d'origine
+(ce que le fork réglait déjà à la main pour les appuis perdus).
 
 Usage visé : version **US (NPUB30467)** avec les **textes européens en français** (copie EU NPEB00553) superposés,
 sur Windows, en version **sans console**.
@@ -94,6 +97,8 @@ localement), ni les fichiers du jeu, ni les textures extraites ou agrandies.
   positive) sont redessinées sur l'image reconstruite ; sinon elles disparaissaient hors sous-titres.
 - `CV_SMOOTH_CUTSCENES=0` remet les cinématiques d'origine, `CV_SMOOTH_CUTSCENE_BARS=0` coupe le redessin des
   bandes. Fichier : `projects/code_veronica/cv_smooth_animation.h` (bandes : version US).
+- Avec l'option d'origine « Retirer les bandes noires des cinématiques » (`CV_NO_LETTERBOX=1`, v1.5.5), les bandes
+  ne sont pas redessinées.
 
 ## 9. Version sans fenêtre console
 
