@@ -527,6 +527,9 @@ extern "C" { int cv_glyph_limit = 108; }   /* fork: read by the patched US text 
 
 extern "C" void rsx_d3d12_disable_forced_anisotropy(void);
 extern "C" void cv_modern_boot();
+extern "C" void cv_host_tuning_init(void);   /* cv_host_tuning.cpp */
+extern "C" void cv_hang_watch_init(void);    /* cv_hang_watch.cpp: hang-log.txt */
+extern "C" void cv_loading_screen_init(void);   /* cv_loading_screen.cpp */
 int main(int argc, char** argv)
 {
     std::string eboot_path;
@@ -548,7 +551,7 @@ int main(int argc, char** argv)
     /* Xbox button icons: the game's own Xbox 360 art, swapped in per archive. */
     cv_button_icons_init();
     cellpad_gameplay_filters_set(cv_gameplay_filter_key,cv_gameplay_filter_buttons,cv_gameplay_filter_stick);
-    g_rsx_srt_hook = cv_combat_hud_quads;
+    g_rsx_srt_hook = cv_hud_overlay_quads;   /* combat HUD + countdown under native 60 FPS */
     g_rsx_srt_sprites_hook = cv_srt_sprites;
     /* The switchable sites lifted into this build (projects/code_veronica/
      * patches.json, this version's sites): a patch file with the same write
@@ -700,6 +703,11 @@ int main(int argc, char** argv)
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
     ppu_hle_init();          /* firmware import NID -> HLE handlers */
     ppu_sysprx_register();   /* boot-critical CRT */
+#ifdef _WIN32
+    cv_host_tuning_init();      /* CV_PIN, CV_PRIORITY */
+    cv_hang_watch_init();       /* CV_HANG_LOG=0 disables */
+    cv_loading_screen_init();   /* the first-start shader screen */
+#endif
     ppu_fs_register();       /* cellFs over the game directory */
     ps3_sampler_start();     /* opt-in PS3_SAMPLE diagnostics */
     lv2_init_syscalls();     /* the lv2 syscall table */

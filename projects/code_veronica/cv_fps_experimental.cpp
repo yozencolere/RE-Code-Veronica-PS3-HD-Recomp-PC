@@ -10,6 +10,7 @@
 #include "cv_inventory_ui_interpolation.h"
 #include "cv_fps_input.h"
 #include "cv_options.h"
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -316,6 +317,22 @@ void bio_update_30hz(ppu_context* ctx) {
         if(smooth)cv_item_interpolation::render(clock.phase());
         cv_inventory_ui::render(clock.phase());
     }
+    // Self-destruct countdown (system+0x1B170 on, +0x1B174 frames left at 60
+    // a second): the game takes 2 off once per DRAWN frame, outside the 30 Hz
+    // logic, so at 60 FPS it ran twice as fast. Allow only 2 per logic update
+    // and give back the rest.
+    {
+        static uint32_t last=0;static unsigned budget=0;
+        const uint32_t system=vm_read32(CV_SCENE_SYSTEM);
+        const uint32_t on=system?vm_read32(system+0x1B170):0,left=system?vm_read32(system+0x1B174):0;
+        if(!on||!left||!last||left>last){last=on?left:0;budget=0;}
+        else {
+            budget=std::min(budget+2*count,8u);
+            const uint32_t taken=last-left;
+            if(taken>budget){vm_write32(system+0x1B174,left+(taken-budget));last=left+(taken-budget);budget=0;}
+            else {budget-=taken;last=left;}
+        }
+    }
     static const bool interpolate=[] {const char* e=std::getenv("CV_RENDER_INTERPOLATION");return e&&std::strcmp(e,"1")==0;}();
     if(interpolate) {
         static const uint32_t markers[]={0x3D650,0x3C4FC,0x3A4D0,0x3E814};
@@ -334,6 +351,12 @@ void bio_update_30hz(ppu_context* ctx) {
         draws=0;updates=0;start=now;
     }
 }
+}
+// True while native 60 FPS rebuilds the frame: the extra scene pass then
+// drops the game's own 2D layer (the self-destruct countdown), so the port
+// draws that countdown itself (cv_combat_hud.cpp). Read from the render thread.
+extern "C" int cv_native_scene_replacing(void) {
+    return enabled()&&cv_options::enabled("CV_SMOOTH_ANIMATION")&&native_scene_ready()?1:0;
 }
 extern "C" void cv_fps_register_game_update() {
     const char* raw=std::getenv("CV_FPS_BENCHMARK_RAW");

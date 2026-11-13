@@ -274,7 +274,9 @@ void scene_models_blend(const ProbeModel* models,unsigned count,const ProbeModel
     }
 }
 bool cutscene_bars_enabled() {
-    static const bool on=[] {const char* e=std::getenv("CV_SMOOTH_CUTSCENE_BARS");return !(e&&e[0]=='0');}();
+    // No bars redrawn on in-between frames when the official option removes them (CV_NO_LETTERBOX=1).
+    static const bool on=[] {const char* e=std::getenv("CV_SMOOTH_CUTSCENE_BARS");const char* n=std::getenv("CV_NO_LETTERBOX");
+                             return !(e&&e[0]=='0')&&!(n&&n[0]=='1');}();
     return on;
 }
 // EU-only diagnostic: repeat scene preparation without the task dispatcher.

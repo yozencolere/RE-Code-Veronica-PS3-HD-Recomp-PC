@@ -260,7 +260,7 @@ typedef struct {
 #define AA_SRV_BASE   (VTEX_SRV_BASE + MAX_DRAWS * 4)   /* anti-aliasing pass: 5 views */
 #define DISPLAY_SRV_BASE (AA_SRV_BASE + 8)   /* display pass: 5 views per frame slot */
 #define SPRITE_SRV    (DISPLAY_SRV_BASE + 5 * FRAME_COUNT)   /* the SRT's image atlas */
-#define SRV_HEAP_SIZE (SPRITE_SRV + 4)
+#define SRV_HEAP_SIZE (SPRITE_SRV + 3 + FRAME_COUNT)   /* + the shader screen's textures */
 
 /* Per-frame VP texture slot: a guest texture uploaded for this frame's VP
  * draws (re-uploaded every frame -- gcm/cube's plasma animates in guest
@@ -822,7 +822,9 @@ static void wait_for_gpu(void);
 static void srv_write(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt, UINT mapping);
 #include "rsx_trophy_texture.h"
 static rsx_trophy_texture s_trophy_textures[FRAME_COUNT];
+static rsx_trophy_texture s_loading_textures[FRAME_COUNT];   /* the first-start shader screen */
 static QuadVb s_trophy_vbs;
+static QuadVb s_loading_vbs;
 static ID3D12PipelineState* s_spr_pso;
 static ID3D12Resource *s_spr_tex, *s_spr_up;
 static u64 s_spr_gen;
@@ -974,6 +976,28 @@ static void trophy_popup_draw(u32 fi,u32 w,u32 h,const float mvp[16]) {
  quad_vb_draw(fi,&s_trophy_vbs,0,1,mvp,s_spr_pso);
 }
 
+/* First-start shader screen (projects/code_veronica/cv_loading_screen.cpp):
+ * one full-window image while the shipped shader list builds. Returns 1 when
+ * it covers the window, so the corner note and the SRT stay hidden under it. */
+const rsx_ui_sprite* (*g_rsx_loading_hook)(uint32_t,uint32_t,const uint32_t**,uint32_t*,uint32_t*,uint64_t*);
+static int s_loading_screen_on;
+static void loading_screen_draw(u32 fi,u32 w,u32 h,const float mvp[16]) {
+ s_loading_screen_on=0;
+ if(!g_rsx_loading_hook)return;
+ const uint32_t* rgba=NULL;u32 aw=0,ah=0;u64 generation=0;
+ const rsx_ui_sprite* sp=g_rsx_loading_hook(w,h,&rgba,&aw,&ah,&generation);
+ if(!sp||!(sp->argb>>24)||!sprite_pso()||!rsx_ui_texture_upload(&s_loading_textures[fi],s_d3d.device,s_d3d.cmd_list,rgba,aw,ah,generation,2048,2048))return;
+ if(!quad_vb_reserve(fi,1,&s_loading_vbs))return;
+ UiVertex* vertices=(UiVertex*)s_loading_vbs.mapped[fi];static const unsigned order[6]={0,1,2,2,1,3};
+ for(unsigned k=0;k<6;k++){unsigned corner=order[k];UiVertex v={sp->x+((corner&2)?sp->w:0),sp->y+((corner&1)?sp->h:0),0,1,1,1,(sp->argb>>24)/255.f,(corner&2)?sp->u1:sp->u0,(corner&1)?sp->v1:sp->v0};vertices[k]=v;}
+ const u32 slot=SPRITE_SRV+3+fi;
+ srv_write(slot,s_loading_textures[fi].texture,DXGI_FORMAT_R8G8B8A8_UNORM,D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+ ID3D12GraphicsCommandList* cl=s_d3d.cmd_list;D3D12_GPU_DESCRIPTOR_HANDLE handle;s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap,&handle);handle.ptr+=(u64)slot*s_d3d.srv_inc;
+ cl->lpVtbl->SetDescriptorHeaps(cl,1,&s_d3d.srv_heap);cl->lpVtbl->SetGraphicsRootSignature(cl,s_d3d.root_signature);cl->lpVtbl->SetGraphicsRootDescriptorTable(cl,1,handle);
+ quad_vb_draw(fi,&s_loading_vbs,0,1,mvp,s_spr_pso);
+ s_loading_screen_on=(sp->argb>>24)>=250;
+}
+
 /* The game's UI batch: logical 640x480, centred at 4:3. */
 static void ui_batch_draw(u32 fi)
 {
@@ -1001,12 +1025,47 @@ static void ui_batch_draw(u32 fi)
 const rsx_ui_quad* (*g_rsx_srt_hook)(uint32_t,uint32_t,uint32_t*);
 /* The images that go with the quads g_rsx_srt_hook just returned. */
 const rsx_ui_sprite* (*g_rsx_srt_sprites_hook)(uint32_t*,const uint32_t**,uint32_t*,uint32_t*,uint64_t*);
+/* The 3D cutscenes' black bars (CV_NO_LETTERBOX): the game's solid colour
+ * program (one instruction, output = interpolated colour), blended, drawn as
+ * one 12-vertex draw (both bars) or two 6-vertex draws (top, then bottom).
+ * The same program also fills the dark panels of the status/menu screens and
+ * can fill a fade, so the draw counts as a bar only by its shape: every quad
+ * (6 vertices, in screen pixels in attribute 0) spans the full width, touches
+ * the top or the bottom edge and is at most a quarter of the height high
+ * (F12 captures: bars -80..1360 x 0..72; a status panel 250..778 x 198..474). */
+static int letterbox_bar(const D3D12DrawRecord* d,u32 parity)
+{
+    static const u8 bars[16]={0x9E,0x81,0x01,0x40,0xC8,0x01,0x1C,0x9D,0xC8,0x00,0x00,0x01,0xC8,0x00,0x3F,0xE1};
+    if(!d->is_vp||d->is_clear||d->is_copy||d->fp_bytes!=16||!d->blend_key)return 0;
+    if(d->vertex_count!=6&&d->vertex_count!=12)return 0;
+    if(d->vb_byte_offset%256||!s_d3d.vp_vb_mapped)return 0;
+    const u8* code=fp_snap_ptr(d);
+    if(!code||memcmp(code,bars,16))return 0;
+    const float W=(float)(d->rt_w?d->rt_w:1280),H=(float)(d->rt_h?d->rt_h:720);
+    for(u32 q=0;q<d->vertex_count;q+=6) {
+        float x0=1e9f,x1=-1e9f,y0=1e9f,y1=-1e9f;
+        for(u32 v=q;v<q+6;v++) {
+            float at[16][4];const float* a;
+            if(s_vf_mapped){vf_capture_vertex(parity,d->vb_byte_offset/256+v,at);a=at[0];}
+            else a=(const float*)((const u8*)s_d3d.vp_vb_mapped+((u64)parity*MAX_VERTICES*256u)+d->vb_byte_offset+(u64)v*256u);
+            if(!(a[0]==a[0])||!(a[1]==a[1]))return 0;
+            if(a[0]<x0)x0=a[0];if(a[0]>x1)x1=a[0];if(a[1]<y0)y0=a[1];if(a[1]>y1)y1=a[1];
+        }
+        if(x0>1.f||x1<W-1.f)return 0;                 /* not across the whole width */
+        if(y1-y0>H*0.25f)return 0;                    /* too tall: a panel or a fade */
+        if(y0>1.f&&y1<H-1.f)return 0;                 /* touches neither edge */
+    }
+    return 1;
+}
+static int cv_no_letterbox(void) { static int on=-1; if(on<0){const char* e=getenv("CV_NO_LETTERBOX");on=e&&e[0]=='1';} return on; }
 static void perf_overlay_draw(u32 fi)
 {
     u32 w=rs_dim(s_d3d.width,s_rs),h=rs_dim(s_d3d.height,s_rs),count=0;
     if(s_qb_display) {w=s_qb_w;h=s_qb_h;}
     float mvp[16]={0};
     mvp[0]=2.f/(float)w;mvp[5]=-2.f/(float)h;mvp[10]=mvp[15]=1;mvp[12]=-1;mvp[13]=1;
+    loading_screen_draw(fi,w,h,mvp);
+    if(s_loading_screen_on){trophy_popup_draw(fi,w,h,mvp);return;}
     if(g_rsx_srt_hook) {
         const rsx_ui_quad* srt=g_rsx_srt_hook(w,h,&count);
         u32 ns=0,aw=0,ah=0;u64 gen=0;const uint32_t* atlas=NULL;
@@ -1819,6 +1878,40 @@ static HWND create_window(u32 width, u32 height, const char* title)
  * against 20 ms every refresh and 22 ms unsynced). VSYNC_INTERVAL=n forces
  * an interval for such comparisons. */
 void rsx_d3d12_set_vsync(int on) { InterlockedExchange(&s_vsync_live, on ? 1 : 0); }
+/* CV_FRAME_PACE=1: RTSS-style limiter for unsynced presents. A present that
+ * comes early waits for its slot (previous present + 1/CV_FRAME_PACE_HZ,
+ * default 60): a high-resolution waitable timer sleeps most of it, a short
+ * spin finishes it. A late present goes out at once and resets the slot, so
+ * it never adds latency to a slow frame. Off with vsync (the swap chain paces)
+ * and with FSR frame generation (FSR paces its own pairs). */
+static void frame_pace_wait(UINT interval)
+{
+    static int on = -1; static double period = 1.0 / 60.0, next = 0.0;
+    static HANDLE timer = NULL;
+    if (on < 0) {
+        const char* e = getenv("CV_FRAME_PACE"); on = e && e[0] == '1';
+        const char* hz = getenv("CV_FRAME_PACE_HZ");
+        if (hz && atof(hz) >= 20.0) period = 1.0 / atof(hz);
+        if (on) {
+            timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+            if (!timer) timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+            fprintf(stderr, "[PACE] frame pacing on: %.2f ms slots%s%c", period * 1000.0, timer ? "" : " (no timer, Sleep)", 10);
+        }
+    }
+    if (!on || interval || s_fg_chain) { next = 0.0; return; }
+    double now = perf_now();
+    if (next > now && next - now < period * 1.5) {
+        const double left = next - now;
+        if (left > 0.0015) {
+            if (timer) {
+                LARGE_INTEGER due; due.QuadPart = -(LONGLONG)((left - 0.001) * 1e7);
+                if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, 50);
+            } else Sleep((DWORD)((left - 0.0015) * 1000.0));
+        }
+        while ((now = perf_now()) < next) YieldProcessor();
+        next += period;
+    } else next = now + period;   /* late, or the first one: go now */
+}
 static UINT present_interval(void)
 {
     static int forced = -1;
@@ -5144,6 +5237,8 @@ static void fp_job_free(FpJob* j)
 
 static volatile LONG s_fp_async_skips = 0, s_fp_async_built = 0;
 static volatile LONG s_fp_build_us = 0;  /* worker build time, for PERF */
+volatile LONG g_rsx_watch_frames = 0, g_rsx_watch_draws = 0;   /* read by the port's hang watchdog */
+static LONG s_stats_skips = 0;      /* same draws, for the CV_STATS line */
 static LONG s_fp_drawn_skips = 0;   /* draws really left out (render thread), for PERF */
 static volatile LONG s_fp_inflight = 0;
 static volatile LONG s_fp_urgent_inflight = 0;   /* urgent builds the frame waits for */                /* submitted, not yet built */
@@ -6264,6 +6359,12 @@ static volatile LONG s_pl_next_vs = 0, s_pl_next_fp = 0, s_pl_done_vs = 0, s_pl_
 static volatile LONG s_pl_threads_left = 0, s_pl_built = 0;
 static PlDone* s_pl_done = NULL;
 static double s_pl_t0 = 0.0;
+/* Shipped list: built once before gameplay (the game waits on the loading
+ * note), then the per-GPU cache makes later starts fast. A marker in the
+ * cache folder remembers which shipped list was already built. */
+static int s_pl_seed_wait = 0;
+static u32 s_pl_seed_sig = 0;
+static volatile LONG s_pl_worker_reported = 0;
 
 static u32 pl_rd32(const u8* p) { u32 v; memcpy(&v, p, 4); return v; }
 static u64 pl_mix(u64 h, u32 v) { h ^= v; h *= 1099511628211ull; return h; }
@@ -6318,6 +6419,95 @@ static void pl_put_record(u32 type, const u32* head, int nhead, const u8* ucode,
     s_pl_out_n = need;
 }
 
+static int s_pl_cap_vs = 0, s_pl_cap_fp = 0;
+/* Records of one list, p[0..sz) with its 8-byte header already checked, into
+ * the known set and the vertex-program / pipeline arrays (they point into p,
+ * which must stay allocated). A program already known is skipped, so a list
+ * read first wins. Returns the offset of the first bad record, or sz. */
+static size_t pl_parse(const u8* p, size_t sz)
+{
+    size_t at = 8;
+    while (at + 12 <= sz) {
+        const u32 type = pl_rd32(p + at), plen = pl_rd32(p + at + 4);
+        if (plen > sz - at - 12 || pl_sum(2166136261u, p + at + 12, plen) != pl_rd32(p + at + 8)) break;
+        const u8* q = p + at + 12;
+        if (type == PL_REC_VS && plen >= 16 && 16u + pl_rd32(q + 12) == plen) {
+            if (pl_known_add(pl_vs_id(pl_rd32(q))) && s_pl_nvs < PL_MAX_VS) {
+                if (s_pl_nvs == s_pl_cap_vs) {
+                    s_pl_cap_vs = s_pl_cap_vs ? s_pl_cap_vs * 2 : 256;
+                    PlVs* t = (PlVs*)realloc(s_pl_vs, (size_t)s_pl_cap_vs * sizeof *t);
+                    if (!t) break;
+                    s_pl_vs = t;
+                }
+                PlVs* v = &s_pl_vs[s_pl_nvs++];
+                memset(v, 0, sizeof *v);
+                v->hash = pl_rd32(q); v->vstart = pl_rd32(q + 4); v->vtex_mask = pl_rd32(q + 8);
+                v->len = pl_rd32(q + 12); v->ucode = q + 16;
+            }
+        } else if (type == PL_REC_FP && plen >= 44 && 44u + pl_rd32(q + 40) == plen) {
+            PlFp r;
+            memset(&r, 0, sizeof r);
+            r.key.vs_hash = pl_rd32(q); r.key.blend = pl_rd32(q + 4); r.key.nrt = (int)pl_rd32(q + 8);
+            r.key.rtfmt = pl_rd32(q + 12); r.key.exp32 = (int)pl_rd32(q + 16); r.key.ucode_hash = pl_rd32(q + 20);
+            r.key.cmask = pl_rd32(q + 24); r.key.cull = pl_rd32(q + 28); r.key.cube_mask = pl_rd32(q + 32);
+            r.key.fp_addr = pl_rd32(q + 36); r.key.vs_idx = -1;
+            r.len = pl_rd32(q + 40); r.ucode = q + 44;
+            if (pl_known_add(pl_fp_id(&r.key)) && s_pl_nfp < PL_MAX_FP) {
+                if (s_pl_nfp == s_pl_cap_fp) {
+                    s_pl_cap_fp = s_pl_cap_fp ? s_pl_cap_fp * 2 : 1024;
+                    PlFp* t = (PlFp*)realloc(s_pl_fp, (size_t)s_pl_cap_fp * sizeof *t);
+                    if (!t) break;
+                    s_pl_fp = t;
+                }
+                s_pl_fp[s_pl_nfp++] = r;
+            }
+        }
+        at += 12u + plen;
+    }
+    return at;
+}
+
+/* The list that ships with the game (assets/shader-seed/pipelines-seed.list,
+ * beside bin/): pipelines recorded in earlier play sessions, so a first start
+ * already has them to preload and the first shot in a room does not skip a
+ * draw while its effect shaders compile. Same guest programs as the player's
+ * own list, read after it and never written back. CV_SHADER_SEED=<file> names
+ * another one, CV_SHADER_SEED=0 turns it off. */
+static u8* s_pl_seed = NULL;
+static void pl_load_seed(void)
+{
+    char path[MAX_PATH];
+    const char* e = getenv("CV_SHADER_SEED");
+    if (e && e[0]) {
+        if (!strcmp(e, "0")) return;
+        snprintf(path, sizeof path, "%s", e);
+    } else {
+        char exe[MAX_PATH];
+        const DWORD n = GetModuleFileNameA(NULL, exe, MAX_PATH);
+        char* slash = (n && n < MAX_PATH) ? strrchr(exe, '\\') : NULL;
+        if (!slash) return;
+        *slash = 0;
+        snprintf(path, sizeof path, "%s/../assets/shader-seed/pipelines-seed.list", exe);
+    }
+    FILE* f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END); const long n = ftell(f); fseek(f, 0, SEEK_SET);
+    size_t sz = 0;
+    if (n > 8 && (s_pl_seed = (u8*)malloc((size_t)n)) != NULL &&
+        fread(s_pl_seed, 1, (size_t)n, f) == (size_t)n) sz = (size_t)n;
+    fclose(f);
+    if (sz < 8 || pl_rd32(s_pl_seed) != PL_MAGIC || pl_rd32(s_pl_seed + 4) != PL_VERSION) {
+        free(s_pl_seed); s_pl_seed = NULL;
+        return;
+    }
+    const int vs0 = s_pl_nvs, fp0 = s_pl_nfp;
+    pl_parse(s_pl_seed, sz);
+    { u32 h = 2166136261u; for (size_t i = 0; i < sz; i++) { h ^= s_pl_seed[i]; h *= 16777619u; }
+      s_pl_seed_sig = h ? h : 1u; }
+    fprintf(stderr, "[PRELOAD] shipped list %s: %d vertex programs, %d pipelines added%c",
+            path, s_pl_nvs - vs0, s_pl_nfp - fp0, 10);
+}
+
 static BOOL CALLBACK pl_load(PINIT_ONCE once, PVOID arg, PVOID* ctx)
 {
     (void)once; (void)arg; (void)ctx;
@@ -6341,49 +6531,24 @@ static BOOL CALLBACK pl_load(PINIT_ONCE once, PVOID arg, PVOID* ctx)
     const u8* p = s_pl_file;
     if (sz < 8 || pl_rd32(p) != PL_MAGIC || pl_rd32(p + 4) != PL_VERSION) {
         s_pl_rewrite = 1;   /* none yet, or another format: start a new list */
-        return TRUE;
+    } else {
+        const size_t at = pl_parse(p, sz);
+        s_pl_good = at;
+        if (at != sz) s_pl_rewrite = 1;   /* cut off mid-record (the game was closed while writing) */
     }
-    int cap_vs = 0, cap_fp = 0;
-    size_t at = 8;
-    while (at + 12 <= sz) {
-        const u32 type = pl_rd32(p + at), plen = pl_rd32(p + at + 4);
-        if (plen > sz - at - 12 || pl_sum(2166136261u, p + at + 12, plen) != pl_rd32(p + at + 8)) break;
-        const u8* q = p + at + 12;
-        if (type == PL_REC_VS && plen >= 16 && 16u + pl_rd32(q + 12) == plen) {
-            if (pl_known_add(pl_vs_id(pl_rd32(q))) && s_pl_nvs < PL_MAX_VS) {
-                if (s_pl_nvs == cap_vs) {
-                    cap_vs = cap_vs ? cap_vs * 2 : 256;
-                    PlVs* t = (PlVs*)realloc(s_pl_vs, (size_t)cap_vs * sizeof *t);
-                    if (!t) break;
-                    s_pl_vs = t;
-                }
-                PlVs* v = &s_pl_vs[s_pl_nvs++];
-                memset(v, 0, sizeof *v);
-                v->hash = pl_rd32(q); v->vstart = pl_rd32(q + 4); v->vtex_mask = pl_rd32(q + 8);
-                v->len = pl_rd32(q + 12); v->ucode = q + 16;
-            }
-        } else if (type == PL_REC_FP && plen >= 44 && 44u + pl_rd32(q + 40) == plen) {
-            PlFp r;
-            memset(&r, 0, sizeof r);
-            r.key.vs_hash = pl_rd32(q); r.key.blend = pl_rd32(q + 4); r.key.nrt = (int)pl_rd32(q + 8);
-            r.key.rtfmt = pl_rd32(q + 12); r.key.exp32 = (int)pl_rd32(q + 16); r.key.ucode_hash = pl_rd32(q + 20);
-            r.key.cmask = pl_rd32(q + 24); r.key.cull = pl_rd32(q + 28); r.key.cube_mask = pl_rd32(q + 32);
-            r.key.fp_addr = pl_rd32(q + 36); r.key.vs_idx = -1;
-            r.len = pl_rd32(q + 40); r.ucode = q + 44;
-            if (pl_known_add(pl_fp_id(&r.key)) && s_pl_nfp < PL_MAX_FP) {
-                if (s_pl_nfp == cap_fp) {
-                    cap_fp = cap_fp ? cap_fp * 2 : 1024;
-                    PlFp* t = (PlFp*)realloc(s_pl_fp, (size_t)cap_fp * sizeof *t);
-                    if (!t) break;
-                    s_pl_fp = t;
-                }
-                s_pl_fp[s_pl_nfp++] = r;
-            }
+    pl_load_seed();
+    /* CV_SHADER_SEED_WAIT=0: build the shipped list in the background instead. */
+    if (s_pl_seed_sig) {   /* SHADER_PRELOAD=0 (s_pl_mode 0) still wins */
+        const char* w = getenv("CV_SHADER_SEED_WAIT");
+        char mk[300]; u32 had = 0;
+        snprintf(mk, sizeof mk, "%s/seed-built.txt", shader_cache_dir());
+        FILE* m = fopen(mk, "rb");
+        if (m) { if (fscanf(m, "%x", &had) != 1) had = 0; fclose(m); }
+        if (!(w && w[0] == '0') && had != s_pl_seed_sig && s_pl_mode) {
+            s_pl_mode = 2; s_pl_seed_wait = 1;
+            fprintf(stderr, "[PRELOAD] first start with this shipped list: the game waits until it is built%c", 10);
         }
-        at += 12u + plen;
     }
-    s_pl_good = at;
-    if (at != sz) s_pl_rewrite = 1;   /* cut off mid-record (the game was closed while writing) */
     s_pl_vs_index_cap = 16;
     while (s_pl_vs_index_cap < (u32)s_pl_nvs * 2u) s_pl_vs_index_cap *= 2;
     s_pl_vs_index = (int*)calloc(s_pl_vs_index_cap, sizeof *s_pl_vs_index);
@@ -6530,7 +6695,11 @@ static DWORD WINAPI pl_worker(LPVOID arg)
         InterlockedIncrement(&s_pl_done_fp);
     }
     free(j.hlsl);
-    InterlockedDecrement(&s_pl_threads_left);
+    if (InterlockedDecrement(&s_pl_threads_left) == 0 &&
+        InterlockedCompareExchange(&s_pl_worker_reported, 1, 0) == 0)
+        fprintf(stderr, "[PRELOAD] workers done: vertex %ld/%d, pipelines %ld/%d, built %ld in %.1f s%c",
+                (long)s_pl_done_vs, s_pl_nvs, (long)s_pl_done_fp, s_pl_nfp, (long)s_pl_built,
+                perf_now() - s_pl_t0, 10);
     return 0;
 }
 
@@ -6581,17 +6750,41 @@ static void pl_tick(void)
                 s_pl_nvs, s_pl_nfp, nt, s_pl_mode == 2 ? ", the game waits" : "", 10);
     }
     if (s_pl_mode == 2 && s_pl_threads_left > 0) {   /* hold the frame, a little at a time: the note stays drawn */
+        /* The shipped list holds each frame for half a second: the game is
+         * effectively paused on the note (two updates a second) instead of
+         * running slowly while it builds. */
+        const double hold = s_pl_seed_wait ? 0.5 : 0.1;
         const double t0 = perf_now();
-        while (s_pl_threads_left > 0 && perf_now() - t0 < 0.1) Sleep(2);
+        while (s_pl_threads_left > 0 && perf_now() - t0 < hold) Sleep(2);
     }
     pl_drain();
+    if (s_pl_started && !s_pl_reported) {   /* progress, for support logs */
+        static ULONGLONG last;
+        const ULONGLONG now = GetTickCount64();
+        if (now - last >= 5000) {
+            last = now;
+            fprintf(stderr, "[PRELOAD] progress: vertex %ld/%d, pipelines %ld/%d, built %ld, threads %ld%c",
+                    (long)s_pl_done_vs, s_pl_nvs, (long)s_pl_done_fp, s_pl_nfp, (long)s_pl_built, (long)s_pl_threads_left, 10);
+        }
+    }
     if (s_pl_started && !s_pl_reported && s_pl_threads_left <= 0) {
         s_pl_reported = 1;
         s_pl_finished_at = GetTickCount64();
         fprintf(stderr, "[PRELOAD] %ld pipelines ready in %.1f s (%d listed)%c",
                 (long)s_pl_built, perf_now() - s_pl_t0, s_pl_nfp, 10);
+        fflush(stderr);
+        if (s_pl_seed_sig) {   /* remember it: later starts preload in the background */
+            char mk[300];
+            snprintf(mk, sizeof mk, "%s/seed-built.txt", shader_cache_dir());
+            FILE* m = fopen(mk, "wb");
+            if (m) { fprintf(m, "%08x%c", s_pl_seed_sig, 10); fclose(m); }
+        }
+        if (s_pl_seed_wait) s_pl_mode = 1;
     }
 }
+
+/* 1 while the game is held for the shipped list (the full shader screen). */
+int rsx_shader_preload_waiting(void) { return s_pl_started && s_pl_mode == 2 && s_pl_seed_wait && s_pl_threads_left > 0; }
 
 /* For the loading note (rsx_perf_overlay.c): 0 not started (or nothing to
  * load), 1 loading, 2 finished at *finished_ms (GetTickCount64). */
@@ -11789,6 +11982,15 @@ static void render_frame_impl(void)
                     if(!reported){reported=1;fprintf(stderr,"[DOF] depth-of-field composite disabled; sharp scene preserved\n");}
                     continue;
                 }
+                /* CV_NO_LETTERBOX=1: the 3D cutscenes' black bars. The game draws
+                 * them with a one-instruction colour program right before the
+                 * subtitle text, only while a line is shown (letterbox_bar).
+                 * Leaving those draws out keeps the picture whole. */
+                if(cv_no_letterbox()&&letterbox_bar(dr,(u32)s_rb.parity)) {
+                    static int reported=0;
+                    if(!reported){reported=1;fprintf(stderr,"[LETTERBOX] cutscene bars removed%c",10);}
+                    continue;
+                }
                 /* Per-draw pipeline: prefer the guest's own compiled FP; fall
                  * back to the hardcoded atlas/colour PS pair. */
                 ID3D12PipelineState* dpso =fp_prepared_ready(d,dr);
@@ -11819,7 +12021,7 @@ static void render_frame_impl(void)
                                          dr->cull | ((dr->topology == RSX_TOPOLOGY_LINES) ? 0x100u : 0u),
                                          dr_cube_mask(dr), fp_snap_ptr(dr), dr_fp_urgent(dr));
                 }
-                if (!dpso && dr->fp_addr && s_fp_skip_draw) { s_fp_drawn_skips++; continue; }
+                if (!dpso && dr->fp_addr && s_fp_skip_draw) { s_fp_drawn_skips++; s_stats_skips++; continue; }
                 { ID3D12PipelineState* use = dpso ? dpso : vpso;
                   if (use != last_pso) {
                       s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list, use);
@@ -12616,6 +12818,7 @@ skip_dump_consider: ;
     if (s_rb.present)
         { extern void ps3_ft(char); ps3_ft('R');
           const UINT _iv = present_interval();
+          frame_pace_wait(_iv);
           HRESULT _ph = _iv
               ? s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, _iv, 0)
               : s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, 0,
@@ -12641,6 +12844,37 @@ skip_dump_consider: ;
     }
 
     s_d3d.frame_count++;
+    /* CV_STATS=1: one light line every 5 s for A/B comparisons (FPS, worst
+     * frame, frames over 20 ms, draws skipped for a missing pipeline, the
+     * shader preload). Nothing else is measured per frame. */
+    { static int on = -1; static double last = 0.0, t0 = 0.0, worst = 0.0; static unsigned n = 0, slow = 0;
+      if (on < 0) { const char* e = getenv("CV_STATS"); on = e && e[0] == '1'; }
+      if (on && s_rb.present) {
+          const double now = perf_now(), dt = last > 0.0 ? now - last : 0.0; last = now;
+          if (t0 == 0.0) t0 = now;
+          n++; if (dt > worst) worst = dt; if (dt >= 0.020) slow++;
+          if (now - t0 >= 5.0) {
+              int pd = 0, pt = 0; unsigned long long pf = 0;
+              const int ps = rsx_shader_preload_state(&pd, &pt, &pf);
+              const LONG sk = InterlockedExchange(&s_stats_skips, 0);
+              fprintf(stderr, "[STATS] fps %.1f | worst %.1f ms | >=20ms %u | skip %ld | preload %s %d/%d%c",
+                      n / (now - t0), worst * 1000.0, slow, (long)sk,
+                      ps == 0 ? "off" : ps == 1 ? "loading" : "done", pd, pt, 10);
+              /* Also appended to stats-log.txt beside the game: run-log.txt is
+               * overwritten when the launcher comes back after the game closes. */
+              { static FILE* sf = NULL; static int opened = 0;
+                if (!opened) { opened = 1; sf = fopen("stats-log.txt", "a");
+                  if (sf) { SYSTEMTIME st; GetLocalTime(&st);
+                    fprintf(sf, "=== %04d-%02d-%02d %02d:%02d | %s | seed=%s pin=%s pace=%s pool=%s fg=%s%c",
+                            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute,
+                            getenv("CV_SHADER_SEED") && getenv("CV_SHADER_SEED")[0] == '0' ? "A (normal)" : "B (melhorias)",
+                            getenv("CV_SHADER_SEED") ? getenv("CV_SHADER_SEED") : "-", getenv("CV_PIN") ? getenv("CV_PIN") : "-",
+                            getenv("CV_FRAME_PACE") ? getenv("CV_FRAME_PACE") : "-", getenv("SPU_TASK_POOL") ? getenv("SPU_TASK_POOL") : "-",
+                            getenv("CV_FSR_FRAME_GENERATION") ? getenv("CV_FSR_FRAME_GENERATION") : "-", 10); } }
+                if (sf) { fprintf(sf, "fps %.1f | worst %.1f ms | >=20ms %u | skip %ld%c", n / (now - t0), worst * 1000.0, slow, (long)sk, 10); fflush(sf); } }
+              t0 = now; n = 0; slow = 0; worst = 0.0;
+          }
+      } }
     { static int on = -1; static double last = 0.0;
       if (on < 0) on = getenv("HITCHDBG") ? 1 : 0;
       if (on) {
@@ -12663,6 +12897,7 @@ skip_dump_consider: ;
         static ULONGLONG s_tt0 = 0;
         static u64 s_tframes = 0;
         s_tframes++;
+        g_rsx_watch_frames++; g_rsx_watch_draws = (LONG)s_dbg_last_draws;   /* cv_hang_watch.cpp */
         ULONGLONG tnow = GetTickCount64();
         if (s_tt0 == 0) s_tt0 = tnow;
         if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
@@ -15222,6 +15457,8 @@ void rsx_d3d12_backend_shutdown(void)
         if(s_spr_vbs.vb[i])s_spr_vbs.vb[i]->lpVtbl->Release(s_spr_vbs.vb[i]);
         if(s_trophy_vbs.vb[i])s_trophy_vbs.vb[i]->lpVtbl->Release(s_trophy_vbs.vb[i]);
         rsx_trophy_texture_release(&s_trophy_textures[i]);
+        if(s_loading_vbs.vb[i])s_loading_vbs.vb[i]->lpVtbl->Release(s_loading_vbs.vb[i]);
+        rsx_trophy_texture_release(&s_loading_textures[i]);
     }
     if (s_d3d.depth_buffer) s_d3d.depth_buffer->lpVtbl->Release(s_d3d.depth_buffer);
     if (s_d3d.dsv_heap)     s_d3d.dsv_heap->lpVtbl->Release(s_d3d.dsv_heap);

@@ -305,6 +305,8 @@ endif()
 add_executable(${PROJECT_NAME}
     main.cpp
     $<$<PLATFORM_ID:Windows>:cpu_tier.cpp>
+    $<$<PLATFORM_ID:Windows>:cv_host_tuning.cpp>
+    $<$<PLATFORM_ID:Windows>:cv_hang_watch.cpp>
     $<$<BOOL:${CV_CPU_UNIFIED}>:spu_cpu_select.c>
     $<$<PLATFORM_ID:Windows>:cv_discord.cpp>
     launcher.cpp
@@ -951,6 +953,13 @@ if(WIN32)
 endif()
 
 if(WIN32)
+ # First-start shader screen: Code: Veronica art and a Resident Evil style font, embedded.
+ configure_file(cv_loading_screen.rc.in "${CMAKE_CURRENT_BINARY_DIR}/cv_loading_screen.rc" @ONLY)
+ target_sources(MyGameRecomp PRIVATE cv_loading_screen.cpp "${CMAKE_CURRENT_BINARY_DIR}/cv_loading_screen.rc")
+ set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/cv_loading_screen.rc" PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/loading/fundo.jpg;${CMAKE_CURRENT_SOURCE_DIR}/assets/loading/fonte-re.ttf")
+endif()
+
+if(WIN32)
  configure_file(cv_trophy_sound.rc.in "${CMAKE_CURRENT_BINARY_DIR}/cv_trophy_sound.rc" @ONLY)
  target_sources(MyGameRecomp PRIVATE cv_trophy_popup.cpp "${CMAKE_CURRENT_BINARY_DIR}/cv_trophy_sound.rc")
  set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/cv_trophy_sound.rc" PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/trophy/Trofeu.wav")
@@ -983,6 +992,12 @@ add_custom_command(TARGET MyGameRecomp POST_BUILD
 # for a build run in place, so the Portuguese text works without packaging.
 add_custom_command(TARGET MyGameRecomp POST_BUILD
  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/localization" "$<TARGET_FILE_DIR:MyGameRecomp>/../assets")
+
+# Pipelines recorded in earlier play sessions (tools/merge_pipeline_lists.py).
+# The renderer preloads them at the first start, so effects seen for the first
+# time (a shot in a new room) do not skip a draw while their shaders compile.
+add_custom_command(TARGET MyGameRecomp POST_BUILD
+ COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/shader-seed" "$<TARGET_FILE_DIR:MyGameRecomp>/../assets/shader-seed")
 
 # Regression for the HUD/inventory Caution mismatch, independent of a game dump.
 add_executable(code_veronica_hud_health_tests EXCLUDE_FROM_ALL tests/test_hud_health.cpp)
