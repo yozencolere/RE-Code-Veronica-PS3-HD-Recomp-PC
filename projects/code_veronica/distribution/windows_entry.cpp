@@ -39,7 +39,11 @@ static void clear_developer_environment() {
 }
 
 int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
+    // fork: CV_HITCH=1 keeps the hitch probes (HITCHDBG, PS3_TIMELINE) that the
+    // line below strips, to find what a long frame was spent on.
+    const char* hitch=getenv("CV_HITCH");const bool keep_hitch=hitch&&hitch[0]=='1';
     clear_developer_environment();
+    if(keep_hitch){_putenv_s("HITCHDBG","1");_putenv_s("PS3_TIMELINE","1");}
     _putenv_s("RSX_ANISO","0");
     wchar_t executable[32768];
     if(!GetModuleFileNameW(nullptr,executable,32768))return 1;

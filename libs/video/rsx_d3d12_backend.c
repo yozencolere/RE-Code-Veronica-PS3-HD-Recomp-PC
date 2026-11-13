@@ -15493,13 +15493,25 @@ int rsx_d3d12_backend_pump_messages(void)
         AcquireSRWLockExclusive(&s_title_lock);
         memcpy(tb, s_title_pending, sizeof tb); s_title_dirty = 0;
         ReleaseSRWLockExclusive(&s_title_lock);
+        { const double t0 = perf_now();
         SetWindowTextA(s_d3d.hwnd, tb);
+          const double dt = perf_now() - t0;
+          if (dt > 0.010 && getenv("HITCHDBG")) fprintf(stderr, "[PUMP] SetWindowText %.1f ms%c", dt * 1000.0, 10); }
     }
+    double tp = perf_now();
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+        { const double dp = perf_now() - tp; if (dp > 0.010 && getenv("HITCHDBG")) fprintf(stderr, "[PUMP] PeekMessage %.1f ms (message 0x%04X)%c", dp * 1000.0, msg.message, 10); }
         if (msg.message == WM_QUIT) return -1;
+        const double t0 = perf_now();
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
+        { const double dt = perf_now() - t0;   /* fork: which message holds the frame (HITCHDBG) */
+          if (dt > 0.010 && getenv("HITCHDBG"))
+              fprintf(stderr, "[PUMP] message 0x%04X wp=0x%llX lp=0x%llX hwnd=%p : %.1f ms%c", msg.message,
+                      (unsigned long long)msg.wParam, (unsigned long long)msg.lParam, (void*)msg.hwnd, dt * 1000.0, 10); }
+        tp = perf_now();
     }
+    { const double dp = perf_now() - tp; if (dp > 0.010 && getenv("HITCHDBG")) fprintf(stderr, "[PUMP] PeekMessage (vide) %.1f ms%c", dp * 1000.0, 10); }
     return s_d3d.window_closed ? -1 : 0;
 }
 
