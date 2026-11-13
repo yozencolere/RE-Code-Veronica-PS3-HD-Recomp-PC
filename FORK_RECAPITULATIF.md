@@ -2,8 +2,8 @@
 
 Fork de **RE Code Veronica PS3 HD Recomp PC** de Kastiel
 ([kastieloficial/RE-Code-Veronica-PS3-HD-Recomp-PC](https://github.com/kastieloficial/RE-Code-Veronica-PS3-HD-Recomp-PC), licence MIT),
-mis à jour sur la version **v1.5.5** (branche `fork-fr-us-155`, fusion du tag `v1.5.5` d'origine).
-Toutes les modifications ci-dessous : `git diff v1.5.5` les montre en entier.
+mis à jour sur la version **v1.6.0** (branche `fork-fr-us`, fusions des tags `v1.5.5` puis `v1.6.0` d'origine).
+Toutes les modifications ci-dessous : `git diff v1.6.0` les montre en entier.
 
 Depuis la v1.5.5, « Confirmation améliorée » est activée d'office à 60 FPS par le port d'origine
 (ce que le fork réglait déjà à la main pour les appuis perdus).
@@ -111,6 +111,14 @@ localement), ni les fichiers du jeu, ni les textures extraites ou agrandies.
   « Confirmation améliorée », pas de la manette). Fichier : `libs/input/cellPad.c`.
 
 ---
+
+## 11. Mesure des à-coups
+
+- `CV_HITCH=1` garde les mesures `HITCHDBG` et `PS3_TIMELINE` que la version distribution retire : chaque image
+  de plus de 45 ms est notée avec sa cause, et chaque message Windows (ou `PeekMessage`) de plus de 10 ms est
+  noté `[PUMP]`. C'est ainsi qu'ont été trouvés les à-coups toutes les 3 s provoqués par ASUS GPU Tweak III
+  (messages diffusés par son moniteur d'affichage à l'écran).
+- Fichiers : `projects/code_veronica/distribution/windows_entry.cpp`, `libs/video/rsx_d3d12_backend.c`.
 
 ## Compilation
 
